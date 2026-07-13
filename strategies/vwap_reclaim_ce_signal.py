@@ -1,4 +1,4 @@
-"""
+﻿"""
 VWAP Reclaim CE — OpenAlgo Forward Test
 Run every 15 minutes: 9:15–13:05 IST (Mon–Fri)
 

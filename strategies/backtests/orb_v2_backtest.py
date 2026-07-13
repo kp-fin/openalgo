@@ -26,7 +26,9 @@ import quantstats as qs
 warnings.filterwarnings("ignore")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-API_KEY    = os.getenv("OPENALGO_API_KEY", "your_openalgo_api_key_here")
+API_KEY    = os.getenv("OPENALGO_API_KEY", "")
+if not API_KEY:
+    raise SystemExit("Set OPENALGO_API_KEY environment variable before running.")
 HOST       = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
 START_DATE = "2021-07-01"
 END_DATE   = "2026-06-30"
@@ -51,22 +53,36 @@ try:
     client = openalgo_api(api_key=API_KEY, host=HOST)
 
     print(f"Fetching 5m Nifty data {START_DATE} → {END_DATE} ...")
-    df = client.history(
+    resp = client.history(
         symbol="NIFTY",
         exchange="NSE_INDEX",
         interval="5m",
         start_date=START_DATE,
         end_date=END_DATE,
     )
+
+    # SDK returns a dict; extract the data list
+    if isinstance(resp, dict):
+        if resp.get("status") != "success":
+            raise RuntimeError(f"API error: {resp}")
+        records = resp.get("data", [])
+        df = pd.DataFrame(records)
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.set_index("datetime")
+    elif hasattr(resp, "empty"):
+        df = resp
+    else:
+        raise RuntimeError(f"Unexpected response type: {type(resp)}")
+
     if df is None or df.empty:
         raise RuntimeError("Empty response from OpenAlgo. Check API key and connection.")
 
-    df.index = pd.to_datetime(df.index)
-    if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC")
-    df.index = df.index.tz_convert(IST)
-    df = df.sort_index()
     df.columns = [c.lower() for c in df.columns]
+    if df.index.tz is None:
+        df.index = df.index.tz_localize("Asia/Kolkata")
+    else:
+        df.index = df.index.tz_convert(IST)
+    df = df.sort_index()
     print(f"Loaded {len(df):,} bars: {df.index[0]} → {df.index[-1]}")
 
 except Exception as exc:

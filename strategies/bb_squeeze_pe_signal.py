@@ -1,4 +1,4 @@
-"""
+﻿"""
 BB Squeeze PE — OpenAlgo Forward Test
 Run every 15 minutes: 9:15–15:05 IST (Mon–Fri)
 

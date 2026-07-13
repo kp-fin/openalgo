@@ -1,4 +1,4 @@
-"""
+﻿"""
 ORB v1 — Opening Range Breakout — OpenAlgo Forward Test
 Run every 15 minutes: 9:30–14:35 IST (Mon–Fri)
 
