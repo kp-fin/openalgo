@@ -16,6 +16,7 @@ State persisted to state/orb_v2_state.json (intraday)
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, time as dtime
 
 import pandas as pd
@@ -73,7 +74,7 @@ def get_candles(interval="5m", lookback_days=1):
     if data.get("status") != "success":
         raise RuntimeError(f"History API error: {data}")
     df = pd.DataFrame(data["data"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["timestamp"])
     df = df.set_index("datetime").sort_index()
     return df
 
@@ -263,4 +264,12 @@ def main():
     save_state(state)
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception:
+            log.exception("Unhandled error in main()")
+        if datetime.now(IST).time() >= HARD_EXIT:
+            log.info("Hard exit reached — stopping")
+            break
+        time.sleep(300)  # 5 minutes

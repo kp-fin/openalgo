@@ -17,6 +17,7 @@ State: state/vwap_reclaim_ce_state.json
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
@@ -68,7 +69,7 @@ def get_candles(interval, start, end):
     if data.get("status") != "success":
         raise RuntimeError(data)
     df = pd.DataFrame(data["data"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["timestamp"])
     return df.set_index("datetime").sort_index()
 
 def get_ltp(symbol, exchange="NFO"):
@@ -107,7 +108,7 @@ def compute_daily_ema100():
     """EMA100 on daily closes (last 200 trading days for warm-up)."""
     end   = date.today().isoformat()
     start = (date.today() - timedelta(days=400)).isoformat()
-    df    = get_candles("1d", start, end)
+    df    = get_candles("D", start, end)
     if len(df) < EMA_PERIOD:
         raise RuntimeError("Insufficient daily data for EMA100")
     return float(df["close"].ewm(span=EMA_PERIOD, adjust=False).mean().iloc[-1])
@@ -245,4 +246,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception:
+            log.exception("Unhandled error in main()")
+        if datetime.now(IST).time() >= HARD_EXIT:
+            log.info("Hard exit reached — stopping")
+            break
+        time.sleep(900)  # 15 minutes

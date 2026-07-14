@@ -17,6 +17,7 @@ State: state/pdh_breakout_ce_state.json
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
@@ -68,7 +69,7 @@ def get_candles(interval, start, end):
     if data.get("status") != "success":
         raise RuntimeError(data)
     df = pd.DataFrame(data["data"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["timestamp"])
     return df.set_index("datetime").sort_index()
 
 def get_pdh():
@@ -76,7 +77,7 @@ def get_pdh():
     today = date.today()
     start = (today - timedelta(days=7)).isoformat()   # enough buffer for weekends
     end   = (today - timedelta(days=1)).isoformat()
-    df    = get_candles("1d", start, end)
+    df    = get_candles("D", start, end)
     if df.empty:
         raise RuntimeError("No daily data for PDH")
     return float(df["high"].iloc[-1])
@@ -203,4 +204,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception:
+            log.exception("Unhandled error in main()")
+        if datetime.now(IST).time() >= HARD_EXIT:
+            log.info("Hard exit reached — stopping")
+            break
+        time.sleep(900)  # 15 minutes

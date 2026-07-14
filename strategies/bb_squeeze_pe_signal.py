@@ -15,6 +15,7 @@ State: state/bb_squeeze_pe_state.json
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, time as dtime
 
 import numpy as np
@@ -72,7 +73,7 @@ def get_candles_today(interval="15m"):
     if data.get("status") != "success":
         raise RuntimeError(data)
     df = pd.DataFrame(data["data"])
-    df["datetime"] = pd.to_datetime(df["datetime"])
+    df["datetime"] = pd.to_datetime(df["timestamp"])
     return df.set_index("datetime").sort_index()
 
 def get_ltp(symbol, exchange="NFO"):
@@ -242,4 +243,12 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    while True:
+        try:
+            main()
+        except Exception:
+            log.exception("Unhandled error in main()")
+        if datetime.now(IST).time() >= HARD_EXIT:
+            log.info("Hard exit reached — stopping")
+            break
+        time.sleep(900)  # 15 minutes
