@@ -28,7 +28,7 @@ log = logging.getLogger("bb_squeeze_pe")
 
 API_KEY    = os.getenv("OPENALGO_API_KEY", "your_openalgo_api_key_here")
 HOST       = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
-LOT_SIZE   = 75
+LOT_SIZE   = 65
 TARGET_PCT = 0.35
 STOP_PCT   = 0.25
 HARD_EXIT  = dtime(15, 0)
@@ -73,7 +73,7 @@ def get_candles_today(interval="15m"):
     if data.get("status") != "success":
         raise RuntimeError(data)
     df = pd.DataFrame(data["data"])
-    df["datetime"] = pd.to_datetime(df["timestamp"])
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     return df.set_index("datetime").sort_index()
 
 def get_ltp(symbol, exchange="NFO"):
@@ -90,20 +90,31 @@ def get_nifty_spot():
     r.raise_for_status()
     return float(r.json()["data"]["ltp"])
 
-def get_atm_pe_symbol(spot):
-    strike = round(spot / 50) * 50
-    r = requests.post(f"{HOST}/api/v1/optionsymbol",
-                      json={"apikey": API_KEY, "symbol": "NIFTY", "exchange": "NFO",
-                            "expiry": "current", "strike": strike, "optiontype": "PE"},
+def get_current_expiry():
+    r = requests.post(f"{HOST}/api/v1/expiry",
+                      json={"apikey": API_KEY, "symbol": "NIFTY", "exchange": "NFO", "instrumenttype": "options"},
                       headers=_h(), timeout=10)
     r.raise_for_status()
-    return r.json()["data"]["symbol"], strike
+    data = r.json()
+    if data.get("status") != "success" or not data.get("data"):
+        raise RuntimeError(data)
+    return data["data"][0].replace("-", "")
+
+def get_atm_pe_symbol(spot):
+    strike = round(spot / 50) * 50
+    expiry = get_current_expiry()
+    r = requests.post(f"{HOST}/api/v1/optionsymbol",
+                      json={"apikey": API_KEY, "underlying": "NIFTY", "exchange": "NSE_INDEX",
+                            "expiry_date": expiry, "offset": "ATM", "option_type": "PE"},
+                      headers=_h(), timeout=10)
+    r.raise_for_status()
+    return r.json()["symbol"], strike
 
 def place_order(symbol, action):
     r = requests.post(f"{HOST}/api/v1/placeorder",
-                      json={"apikey": API_KEY, "symbol": symbol, "exchange": "NFO",
+                      json={"apikey": API_KEY, "strategy": "bb_squeeze_pe", "symbol": symbol, "exchange": "NFO",
                             "action": action, "quantity": LOT_SIZE,
-                            "price_type": "MARKET", "product": "MIS"},
+                            "pricetype": "MARKET", "product": "MIS"},
                       headers=_h(), timeout=15)
     r.raise_for_status()
     return r.json()

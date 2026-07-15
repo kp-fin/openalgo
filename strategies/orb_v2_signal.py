@@ -29,7 +29,7 @@ log = logging.getLogger("orb_v2")
 # ── Config ────────────────────────────────────────────────────────────────────
 API_KEY     = os.getenv("OPENALGO_API_KEY", "your_openalgo_api_key_here")
 HOST        = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
-LOT_SIZE    = 75
+LOT_SIZE    = 65
 OR_MIN      = 30
 OR_MAX      = 150
 TARGET_PCT  = 0.40
@@ -74,7 +74,7 @@ def get_candles(interval="5m", lookback_days=1):
     if data.get("status") != "success":
         raise RuntimeError(f"History API error: {data}")
     df = pd.DataFrame(data["data"])
-    df["datetime"] = pd.to_datetime(df["timestamp"])
+    df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     df = df.set_index("datetime").sort_index()
     return df
 
@@ -93,22 +93,33 @@ def get_nifty_spot():
     r.raise_for_status()
     return float(r.json()["data"]["ltp"])
 
-def get_atm_option_symbol(spot, opt_type):
-    """Build ATM option symbol using OpenAlgo optionsymbol endpoint."""
-    strike = round(spot / 50) * 50
-    r = requests.post(f"{HOST}/api/v1/optionsymbol",
-                      json={"apikey": API_KEY, "symbol": "NIFTY", "exchange": "NFO",
-                            "expiry": "current", "strike": strike, "optiontype": opt_type},
+def get_current_expiry():
+    r = requests.post(f"{HOST}/api/v1/expiry",
+                      json={"apikey": API_KEY, "symbol": "NIFTY", "exchange": "NFO", "instrumenttype": "options"},
                       headers=_headers(), timeout=10)
     r.raise_for_status()
     data = r.json()
-    return data["data"]["symbol"], strike
+    if data.get("status") != "success" or not data.get("data"):
+        raise RuntimeError(data)
+    return data["data"][0].replace("-", "")
+
+def get_atm_option_symbol(spot, opt_type):
+    """Build ATM option symbol using OpenAlgo optionsymbol endpoint."""
+    strike = round(spot / 50) * 50
+    expiry = get_current_expiry()
+    r = requests.post(f"{HOST}/api/v1/optionsymbol",
+                      json={"apikey": API_KEY, "underlying": "NIFTY", "exchange": "NSE_INDEX",
+                            "expiry_date": expiry, "offset": "ATM", "option_type": opt_type},
+                      headers=_headers(), timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    return data["symbol"], strike
 
 def place_order(symbol, action):
     r = requests.post(f"{HOST}/api/v1/placeorder",
-                      json={"apikey": API_KEY, "symbol": symbol, "exchange": "NFO",
+                      json={"apikey": API_KEY, "strategy": "orb_v2", "symbol": symbol, "exchange": "NFO",
                             "action": action, "quantity": LOT_SIZE,
-                            "price_type": "MARKET", "product": "MIS"},
+                            "pricetype": "MARKET", "product": "MIS"},
                       headers=_headers(), timeout=15)
     r.raise_for_status()
     return r.json()
@@ -142,10 +153,6 @@ def main():
         save_state(state)
         if not state["or_locked"] or state["range_day"]:
             return
-
-    if state["range_day"]:
-        log.info("Range day — no trades.")
-        return
 
     orb_high = state["orb_high"]
     orb_low  = state["orb_low"]
@@ -193,8 +200,11 @@ def main():
 
     save_state(state)
 
-    # ── No new entries after 12:00 or hard exit ───────────────────────────────
+    # ── No new entries after 12:00, hard exit, or on a range day ─────────────
     if t > ENTRY_END or t >= HARD_EXIT:
+        return
+    if state["range_day"]:
+        log.info("Range day — no new entries.")
         return
 
     # ── Signal detection ──────────────────────────────────────────────────────
