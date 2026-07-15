@@ -1,6 +1,6 @@
 """
-ORB_kp — Peachy Rejection Method, Debit Spread Execution — OpenAlgo Forward Test
-(formerly ORB v2 — renamed 2026-07-16 when the spread structure was adopted)
+ORB_Spread — Peachy Rejection Method, Debit Spread Execution — OpenAlgo Forward Test
+(formerly ORB v2, then ORB_kp — renamed ORB_Spread 2026-07-16)
 Run every 5 minutes: 9:45-14:35 IST (Mon-Fri)
 
 Opening Range: 9:15-9:45 IST (30m)
@@ -11,7 +11,7 @@ Higher Low     -> Bull Call Spread (confirmation, if no primary)
 Range day skip: price inside OR at 10:15 -> no new entries today
 
 Exit decision is based on NIFTY SPOT movement, not spread premium percent
-— matches the backtest methodology exactly (indices-system/strategies/orb_v2.md,
+— matches the backtest methodology exactly (indices-system/strategies/orb_spread.md,
 "Debit Spread Structure" section):
     Target: +40 pts spot move in favor | Stop: -25 pts spot move against
     Hard exit: 14:30 IST
@@ -32,7 +32,7 @@ re-resolving "ATM" then could target a different strike than what we
 actually hold. Exit closes the exact stored entry symbols via two plain
 /api/v1/placeorder calls instead.
 
-State persisted to state/orb_kp_state.json (intraday)
+State persisted to state/orb_spread_state.json (intraday)
 """
 
 import json
@@ -46,7 +46,7 @@ import pytz
 import requests
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
-log = logging.getLogger("orb_kp")
+log = logging.getLogger("orb_spread")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 API_KEY       = os.getenv("OPENALGO_API_KEY", "your_openalgo_api_key_here")
@@ -61,7 +61,7 @@ ENTRY_END     = dtime(12, 0)
 HARD_EXIT     = dtime(14, 30)
 RANGE_CHK     = dtime(10, 15)
 IST           = pytz.timezone("Asia/Kolkata")
-STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "orb_kp_state.json")
+STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "orb_spread_state.json")
 
 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 
@@ -132,7 +132,7 @@ def get_multiquotes(symbols):
 
 def place_order(symbol, action):
     r = requests.post(f"{HOST}/api/v1/placeorder",
-                      json={"apikey": API_KEY, "strategy": "orb_kp", "symbol": symbol, "exchange": "NFO",
+                      json={"apikey": API_KEY, "strategy": "orb_spread", "symbol": symbol, "exchange": "NFO",
                             "action": action, "quantity": LOT_SIZE,
                             "pricetype": "MARKET", "product": "MIS"},
                       headers=_headers(), timeout=15)
@@ -145,7 +145,7 @@ def open_spread(option_type):
     Returns (long_symbol, short_symbol, long_ltp, short_ltp)."""
     expiry = get_current_expiry()
     r = requests.post(f"{HOST}/api/v1/optionsmultiorder",
-                      json={"apikey": API_KEY, "strategy": "orb_kp", "underlying": "NIFTY",
+                      json={"apikey": API_KEY, "strategy": "orb_spread", "underlying": "NIFTY",
                             "exchange": "NSE_INDEX", "expiry_date": expiry,
                             "legs": [
                                 {"offset": "ATM", "option_type": option_type, "action": "BUY", "quantity": LOT_SIZE},
@@ -173,7 +173,7 @@ def close_spread(long_symbol, short_symbol):
 def main():
     now = datetime.now(IST)
     t   = now.time()
-    log.info(f"ORB_kp check — {now.strftime('%H:%M:%S IST')}")
+    log.info(f"ORB_Spread check — {now.strftime('%H:%M:%S IST')}")
 
     state = load_state()
 
