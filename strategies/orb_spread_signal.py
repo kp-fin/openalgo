@@ -1,7 +1,7 @@
 """
 ORB_Spread — Peachy Rejection Method, Debit Spread Execution — OpenAlgo Forward Test
 (formerly ORB v2, then ORB_kp — renamed ORB_Spread 2026-07-16)
-Run every 5 minutes: 9:45-14:35 IST (Mon-Fri)
+Run every 5 minutes: 9:45-15:15 IST (Mon-Fri)
 
 Opening Range: 9:15-9:45 IST (30m)
 Bearish Reject -> Bear Put Spread  (BUY ATM PE + SELL OTM1 PE)
@@ -14,7 +14,7 @@ Exit decision is based on NIFTY SPOT movement, not spread premium percent
 — matches the backtest methodology exactly (indices-system/strategies/orb_spread.md,
 "Debit Spread Structure" section):
     Target: +40 pts spot move in favor | Stop: -25 pts spot move against
-    Hard exit: 14:30 IST
+    Hard exit: 15:15 IST (changed from 14:30, 2026-07-16 -- see "Hard Exit Time" test)
 
 Spread width: 50 pts (ATM long leg + OTM1 short leg = one real NIFTY
 strike interval). Adopted from backtest evidence — a narrow/cheap spread
@@ -58,7 +58,7 @@ TARGET_PTS    = 40          # NIFTY spot points (matches backtest, not premium %
 STOP_PTS      = 25
 SHORT_OFFSET  = "OTM1"      # short leg = one real strike interval from ATM (~50pts)
 ENTRY_END     = dtime(12, 0)
-HARD_EXIT     = dtime(14, 30)
+HARD_EXIT     = dtime(15, 15)   # changed from 14:30, 2026-07-16 -- see orb_spread.md "Hard Exit Time" test
 RANGE_CHK     = dtime(10, 15)
 IST           = pytz.timezone("Asia/Kolkata")
 STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "orb_spread_state.json")
