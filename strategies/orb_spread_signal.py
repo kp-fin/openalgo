@@ -9,6 +9,14 @@ Bullish Reject -> Bull Call Spread (BUY ATM CE + SELL OTM1 CE)
 Lower High     -> Bear Put Spread  (confirmation, if no primary)
 Higher Low     -> Bull Call Spread (confirmation, if no primary)
 Range day skip: price inside OR at 10:15 -> no new entries today
+Previous-day filter: if yesterday's net directional move exceeds
+PREV_MOVE_THRESHOLD -> no new entries today (added 2026-07-16, see
+"Previous-Day Net Move" test in orb_spread.md -- backtest: quiet prior
+day PF 1.38 (397 trades) vs big-trend prior day PF 0.98 (395 trades),
+essentially a coin-flip loser. Fails OPEN (does not block trading) if
+the fetch fails -- this is an added filter on an already-working
+strategy, not a risk control, so a fetch outage should not blank the
+whole day.
 
 Exit decision is based on NIFTY SPOT movement, not spread premium percent
 — matches the backtest methodology exactly (indices-system/strategies/orb_spread.md,
@@ -39,7 +47,7 @@ import json
 import logging
 import os
 import time
-from datetime import date, datetime, time as dtime
+from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
 import pytz
@@ -57,6 +65,7 @@ OR_MAX        = 150
 TARGET_PTS    = 40          # NIFTY spot points (matches backtest, not premium %)
 STOP_PTS      = 25
 SHORT_OFFSET  = "OTM1"      # short leg = one real strike interval from ATM (~50pts)
+PREV_MOVE_THRESHOLD = 0.42  # % -- matches the backtest's entry-level median split (2026-07-16)
 ENTRY_END     = dtime(12, 0)
 HARD_EXIT     = dtime(15, 15)   # changed from 14:30, 2026-07-16 -- see orb_spread.md "Hard Exit Time" test
 RANGE_CHK     = dtime(10, 15)
@@ -77,7 +86,7 @@ def load_state():
             pass
     return {"date": today, "orb_high": None, "orb_low": None, "or_locked": False,
             "range_day": False, "bear_traded": False, "bull_traded": False,
-            "bear_position": None, "bull_position": None}
+            "bear_position": None, "bull_position": None, "prev_move_pct": None}
 
 def save_state(s):
     json.dump(s, open(STATE_FILE, "w"), default=str)
@@ -100,6 +109,24 @@ def get_candles(interval="5m"):
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     df = df.set_index("datetime").sort_index()
     return df
+
+def get_prev_day_move_pct():
+    """Previous trading day's net directional move as % of that day's open
+    (|close - open| / open * 100). Regime filter -- see orb_spread.md
+    "Previous-Day Net Move" test for why."""
+    today = date.today()
+    start = (today - timedelta(days=10)).isoformat()   # buffer for weekends/holidays
+    end   = (today - timedelta(days=1)).isoformat()
+    r = requests.post(f"{HOST}/api/v1/history",
+                      json={"apikey": API_KEY, "symbol": "NIFTY", "exchange": "NSE_INDEX",
+                            "interval": "D", "start_date": start, "end_date": end},
+                      headers=_headers(), timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "success" or not data.get("data"):
+        raise RuntimeError(f"History API error: {data}")
+    last = data["data"][-1]   # most recent daily bar = yesterday's session
+    return abs(last["close"] - last["open"]) / last["open"] * 100
 
 def get_nifty_spot():
     r = requests.post(f"{HOST}/api/v1/quotes",
@@ -176,6 +203,19 @@ def main():
     log.info(f"ORB_Spread check — {now.strftime('%H:%M:%S IST')}")
 
     state = load_state()
+
+    # ── Previous-day net move regime filter (computed once per day) ──────────
+    # Retried every tick until it succeeds; never blocks the rest of main() --
+    # fails OPEN (entries allowed) if the fetch is unavailable, since this is
+    # an added filter on an already-working strategy, not a risk control.
+    if state.get("prev_move_pct") is None:
+        try:
+            state["prev_move_pct"] = get_prev_day_move_pct()
+            log.info(f"Prev-day net move = {state['prev_move_pct']:.2f}% "
+                     f"(entries allowed only if <= {PREV_MOVE_THRESHOLD}%)")
+            save_state(state)
+        except Exception as e:
+            log.warning(f"Prev-day move fetch failed (will retry next tick): {e}")
 
     # ── Build / update 30m OR ─────────────────────────────────────────────────
     if not state["or_locked"]:
@@ -257,6 +297,9 @@ def main():
         return
     if state["range_day"]:
         log.info("Range day — no new entries.")
+        return
+    if state.get("prev_move_pct") is not None and state["prev_move_pct"] > PREV_MOVE_THRESHOLD:
+        log.info(f"Prev-day move {state['prev_move_pct']:.2f}% > {PREV_MOVE_THRESHOLD}% threshold — no new entries.")
         return
 
     # ── Signal detection ──────────────────────────────────────────────────────
