@@ -56,9 +56,24 @@ def broker_callback(broker, para=None):
             return redirect(url_for("auth.login"))
 
     if session.get("logged_in"):
-        # Store broker in session and g
-        session["broker"] = broker
-        return redirect(url_for("dashboard_bp.dashboard"))
+        # The Flask session cookie can say "logged_in" long after the
+        # broker's own auth token has expired/been revoked (daily token
+        # rotation) -- short-circuiting to the dashboard here on session
+        # state alone silently skips the OAuth exchange below and leaves
+        # the stale/revoked token in place, making broker reconnect
+        # impossible without a full logout first. Verify the token is
+        # actually still valid before treating this as a no-op.
+        from database.auth_db import get_auth_token
+
+        if get_auth_token(session.get("user")):
+            # Store broker in session and g
+            session["broker"] = broker
+            return redirect(url_for("dashboard_bp.dashboard"))
+        logger.info(
+            f"Session has logged_in=True but broker token is invalid/revoked for "
+            f"{session.get('user')} -- proceeding with fresh {broker} auth instead of "
+            "short-circuiting to the dashboard"
+        )
 
     broker_auth_functions = app.broker_auth_functions
     auth_function = broker_auth_functions.get(f"{broker}_auth")
