@@ -4,7 +4,13 @@ backtests (BB Squeeze PE, PDH Breakout CE, VWAP Reclaim CE).
 
 Matches the assumption stated in each strategy's spec: IV = 15% flat, simulation only
 (no real option-chain data used — these strategies price a hypothetical ATM option off
-the Nifty spot signal). Nearest weekly Thursday expiry, ATM = nearest 50-pt strike.
+the Nifty spot signal). Nearest weekly expiry, ATM = nearest 50-pt strike.
+
+NOTE: the 3 strategies this module served (BB Squeeze PE, PDH Breakout CE, VWAP Reclaim CE)
+were retired and deleted 2026-07-17 -- this module is now orphaned (no live consumer), kept
+only as a reference in case a future strategy needs the same BS-pricing/expiry-lookup pattern.
+The expiry helper below was corrected 2026-07-17 (NIFTY's weekly expiry moved Thursday -> Tuesday
+since this module was originally written).
 """
 
 from datetime import date, timedelta
@@ -21,11 +27,13 @@ def nearest_atm_strike(spot: float, step: int = 50) -> float:
 
 
 def nearest_weekly_expiry(trade_date: date) -> date:
-    """Next Thursday on/after trade_date (weekday() : Mon=0 ... Thu=3)."""
-    days_ahead = (3 - trade_date.weekday()) % 7
+    """Next Tuesday on/after trade_date (weekday() : Mon=0 ... Tue=1). Corrected
+    2026-07-17 -- NIFTY's weekly expiry moved from Thursday to Tuesday; this
+    function originally targeted Thursday (weekday()==3)."""
+    days_ahead = (1 - trade_date.weekday()) % 7
     expiry = trade_date + timedelta(days=days_ahead)
     if expiry == trade_date:
-        # today is Thursday and IS the expiry — still valid as "nearest", callers
+        # today is Tuesday and IS the expiry — still valid as "nearest", callers
         # that need to skip same-day expiry (BB Squeeze) handle that themselves.
         return expiry
     return expiry
