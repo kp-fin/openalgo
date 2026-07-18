@@ -714,6 +714,19 @@ def setup_environment(app):
                 logger.error(f"Failed to initialize Historify scheduler: {e}")
 
             try:
+                # Daily 15:30 IST refresh of portfolio-tracking.md (Sharpe/PF/
+                # win-rate/avg-P&L/correlation) -- see agents/friday/memory/
+                # decisions.md, "Sharpe Ratio >= 2 Adopted as Live-Trading Goal".
+                from services.strategy_metrics_scheduler_service import (
+                    init_strategy_metrics_scheduler,
+                )
+
+                init_strategy_metrics_scheduler()
+                logger.debug("Strategy metrics scheduler initialized")
+            except Exception as e:
+                logger.error(f"Failed to initialize Strategy metrics scheduler: {e}")
+
+            try:
                 # Server-side scalping SL / target / trailing-stop engine. Runs
                 # browser-independently so stops keep working after the user
                 # leaves /scalping or closes the tab. Idles when no SL is set.

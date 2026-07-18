@@ -28,30 +28,37 @@ Instrument: cash equity, MIS (Karan's call, 2026-07-17 -- matches how
 the backtest was computed on spot returns, works across the whole
 universe since not all names are F&O-eligible).
 
-Capital: OWN_CAPITAL = Rs 15,000 (Karan's actual account size for this
-strategy, confirmed 2026-07-17 -- NOT the Rs 1 Cr OpenAlgo Sandbox
-convention used elsewhere in this vault). Position sizing uses
-leveraged BUYING_POWER (OWN_CAPITAL x ASSUMED_MIS_LEVERAGE), not raw
-own capital -- MIS intraday equity gives "up to 5x" leverage per Karan,
-though it varies stock-to-stock. 5x is used here as a sizing-planning
-CEILING, not a precise per-stock figure -- real Dhan MIS margin at
-order time is the actual final gate; an order that fails margin
-validation is caught and logged, not treated as fatal. Sizing against
-raw Rs 15,000 (no leverage) made 5 of 20 universe names completely
-untradeable and 10 more coarse 1-share-only positions -- see
-ema_regime_crossover.md's "Open Item: MTF / Swing Capital Model"
-section for the numbers that drove this.
+Capital: allocated_capital starts at Rs 15,000 (Karan's original account size,
+confirmed 2026-07-17) and is read fresh from capital_state.py's
+capital_allocation.json each poll -- NOT a fixed module constant. As of
+2026-07-18 (Karan's reinvestment rule), live-mode closed trades compound
+their P&L into allocated_capital directly (see capital_state.record_trade);
+paper-mode trades never touch it. Position sizing uses leveraged buying_power
+(allocated_capital x ASSUMED_MIS_LEVERAGE), not raw own capital -- MIS
+intraday equity gives "up to 5x" leverage per Karan, though it varies
+stock-to-stock. 5x is used here as a sizing-planning CEILING, not a precise
+per-stock figure -- real Dhan MIS margin at order time is the actual final
+gate; an order that fails margin validation is caught and logged, not
+treated as fatal. Sizing against raw capital (no leverage) made 5 of 20
+universe names completely untradeable and 10 more coarse 1-share-only
+positions at the original Rs 15,000 -- see ema_regime_crossover.md's
+"Open Item: MTF / Swing Capital Model" section for the numbers that drove
+this.
 
-Daily loss circuit breaker is sized against OWN_CAPITAL (real money at
-risk), NOT the leveraged buying power -- 2% of Rs 15,000 = Rs 300
-(Karan confirmed the 2% figure and the Rs 15,000 base 2026-07-17).
+Daily loss circuit breaker is sized against allocated_capital (real money at
+risk), NOT the leveraged buying power -- 2% of current allocated_capital
+(Karan confirmed the 2% figure and the original Rs 15,000 base 2026-07-17;
+the 2% ratio itself doesn't change as capital compounds).
 
-Sizing: fixed 12.5% of BUYING_POWER per trade (flat, not compounded --
-matches backtest and this vault's documented position-sizing
-preference, just against leveraged buying power instead of raw
-capital). Max 6 concurrent positions across the whole universe; skip a
-new signal beyond that cap. At full 6-position concurrency this
-deploys ~75% of buying power, same ratio as the original spec.
+Sizing: fixed 12.5% of buying_power per trade (flat within a given poll, not
+compounded directly -- but buying_power itself now moves with compounding
+allocated_capital, so effective position size scales over time as live P&L
+accrues). Max 6 concurrent positions across the whole universe; skip a new
+signal beyond that cap. At full 6-position concurrency this deploys ~75% of
+buying_power -- Karan's confirmed cap is 80% of real/own capital
+(2026-07-18), and this vault has already empirically validated (2026-07-17
+live trades) that ~75% of buying_power maps to ~75% of real capital at the
+assumed 5x leverage, comfortably under the 80% limit.
 
 Per-symbol position limit (LIVE-ONLY DIVERGENCE FROM THE BACKTEST):
 the backtest's signal-generation pass does not prevent two independent
@@ -64,9 +71,10 @@ cap. This is a deliberate, small fidelity gap vs. the backtest --
 flagged in ema_regime_crossover.md, not silently introduced.
 
 Daily loss circuit breaker: halts NEW entries only (never blocks exits)
-if today's realized P&L drops below -DAILY_LOSS_LIMIT. Threshold is 2%
-of OWN_CAPITAL (Rs 300) -- both the 2% figure and the Rs 15,000 capital
-base are Karan's own confirmed numbers (2026-07-17), not an assumption.
+if today's realized P&L drops below -daily_loss_limit (2% of the current
+allocated_capital, recomputed each poll -- was a fixed Rs 300 before
+2026-07-18's compounding rule; both the 2% figure and the original Rs 15,000
+base are Karan's own confirmed numbers, 2026-07-17, not an assumption).
 
 Universe: top 10 Nifty 50 + top 10 Nifty Next 50 by trailing 20-day
 average daily traded value, re-ranked on the first poll of each new
@@ -85,6 +93,7 @@ positions/P&L reset daily at hard exit; universe/month persists).
 import json
 import logging
 import os
+import sys
 import time
 from datetime import date, datetime, time as dtime, timedelta
 
@@ -92,6 +101,13 @@ import numpy as np
 import pandas as pd
 import pytz
 import requests
+
+# Deployed copies run from strategies/scripts/ (Python Strategy Host), where
+# only the script's own directory is on sys.path by default -- add the parent
+# strategies/ dir so capital_state.py resolves from both source and deployed
+# locations without needing a duplicated copy kept in sync.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from capital_state import get_allocated_capital, record_trade
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("ema_regime_crossover")
@@ -110,13 +126,16 @@ TARGET_ATR_MULT  = 3.0
 HARD_EXIT        = dtime(15, 0)
 CANDLE_LOOKBACK_DAYS = 60   # comfortably covers 200x30m-bar EMA warmup (~16 trading days) with buffer
 
-OWN_CAPITAL          = 15_000     # Rs 15,000 -- Karan's actual account size for this strategy, confirmed 2026-07-17
 ASSUMED_MIS_LEVERAGE = 5          # "up to 5x", varies stock-to-stock per Karan -- planning ceiling only,
                                    # real Dhan MIS margin at order time is the actual gate (see module docstring)
-BUYING_POWER         = OWN_CAPITAL * ASSUMED_MIS_LEVERAGE   # Rs 75,000 -- used for position sizing
 POSITION_PCT         = 0.125
 MAX_CONCURRENT       = 6
-DAILY_LOSS_LIMIT     = 0.02 * OWN_CAPITAL   # Rs 300 -- sized against real capital at risk, not leveraged buying power
+DAILY_LOSS_PCT       = 0.02       # of allocated_capital -- sized against real capital at risk, not leveraged buying power
+
+# OWN_CAPITAL/BUYING_POWER/DAILY_LOSS_LIMIT used to be fixed constants (Rs
+# 15,000 / Rs 75,000 / Rs 300). As of 2026-07-18 (Karan's capital-reinvestment
+# rule) allocated capital compounds with live P&L, so these are now read fresh
+# from capital_state.py each poll in main() instead of computed once at import.
 
 UNIVERSE_EACH = 10
 
@@ -221,6 +240,24 @@ def get_multiquotes(symbols):
     return {res["symbol"]: float(res["data"]["ltp"]) for res in data["results"]}
 
 
+def log_closed_trade(sym, pos, exit_px, pnl, reason, now):
+    """Append to the trade log (paper AND live) for ongoing Sharpe/PF/win-rate/
+    avg-P&L tracking (2026-07-18). Live mode also compounds pnl into
+    allocated_capital -- see capital_state.py."""
+    record_trade("ema_regime_crossover", {
+        "date": now.strftime("%Y-%m-%d"),
+        "symbol": sym,
+        "direction": pos["direction"],
+        "entry_time": pos["entry_time"],
+        "entry_price": round(pos["entry_price"], 2),
+        "exit_time": now.isoformat(),
+        "exit_price": round(exit_px, 2),
+        "qty": pos["qty"],
+        "pnl_rupees": round(pnl, 2),
+        "reason": reason,
+    }, pnl)
+
+
 def place_order(symbol, action, quantity):
     r = requests.post(f"{HOST}/api/v1/placeorder",
                       json={"apikey": API_KEY, "strategy": "ema_regime_crossover", "symbol": symbol,
@@ -323,6 +360,12 @@ def main():
     t   = now.time()
     log.info(f"EMA Regime Crossover check — {now.strftime('%H:%M:%S IST')}")
 
+    # Read fresh each poll -- allocated_capital compounds with live P&L
+    # (2026-07-18), so this can't be a module-level constant anymore.
+    allocated_capital = get_allocated_capital("ema_regime_crossover")
+    buying_power       = allocated_capital * ASSUMED_MIS_LEVERAGE
+    daily_loss_limit   = DAILY_LOSS_PCT * allocated_capital
+
     state = load_state()
 
     # ── Monthly universe refresh (first poll of a new calendar month) ────────
@@ -357,6 +400,7 @@ def main():
                     pnl = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
                     state["daily_realized_pnl"] += pnl
                     log.info(f"EXIT HARD {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit~={ltp:.2f} pnl~={pnl:+.0f}")
+                    log_closed_trade(sym, pos, ltp, pnl, "HARD_EXIT", now)
                     del positions[sym]
                 except Exception as e:
                     log.error(f"Hard-exit failed for {sym}: {e}")
@@ -420,6 +464,7 @@ def main():
                 pnl = (exit_px - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
                 state["daily_realized_pnl"] += pnl
                 log.info(f"EXIT {reason} {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit={exit_px:.2f} pnl={pnl:+.0f}")
+                log_closed_trade(sym, pos, exit_px, pnl, reason, now)
                 del positions[sym]
             except Exception as e:
                 log.error(f"Exit failed for {sym} ({reason}): {e}")
@@ -427,9 +472,9 @@ def main():
         save_state(state)
 
     # ── Daily loss circuit breaker: halts new entries only ───────────────────
-    if state["daily_realized_pnl"] <= -DAILY_LOSS_LIMIT and not state["daily_loss_halted"]:
+    if state["daily_realized_pnl"] <= -daily_loss_limit and not state["daily_loss_halted"]:
         state["daily_loss_halted"] = True
-        log.warning(f"Daily realized P&L {state['daily_realized_pnl']:+.0f} breached -{DAILY_LOSS_LIMIT:.0f} "
+        log.warning(f"Daily realized P&L {state['daily_realized_pnl']:+.0f} breached -{daily_loss_limit:.0f} "
                     f"circuit breaker — no new entries for the rest of today. Existing positions still managed normally.")
         save_state(state)
     if state["daily_loss_halted"]:
@@ -463,7 +508,7 @@ def main():
         atr = float(last["atr"])
         if atr <= 0 or np.isnan(atr):
             continue
-        qty = int((BUYING_POWER * POSITION_PCT) // entry_price)
+        qty = int((buying_power * POSITION_PCT) // entry_price)
         if qty <= 0:
             continue
 

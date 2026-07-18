@@ -46,12 +46,20 @@ State persisted to state/orb_spread_state.json (intraday)
 import json
 import logging
 import os
+import sys
 import time
 from datetime import date, datetime, time as dtime, timedelta
 
 import pandas as pd
 import pytz
 import requests
+
+# Deployed copies run from strategies/scripts/ (Python Strategy Host), where
+# only the script's own directory is on sys.path by default -- add the parent
+# strategies/ dir so capital_state.py resolves from both source and deployed
+# locations without needing a duplicated copy kept in sync.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from capital_state import get_allocated_capital, record_trade
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("orb_spread")
@@ -71,6 +79,22 @@ HARD_EXIT     = dtime(15, 15)   # changed from 14:30, 2026-07-16 -- see orb_spre
 RANGE_CHK     = dtime(10, 15)
 IST           = pytz.timezone("Asia/Kolkata")
 STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "orb_spread_state.json")
+
+# Debit-spread payoff model for trade-log P&L estimation (mirrors the adopted
+# backtest config -- orb_spread.md "Debit Spread Structure", 50pt/15%-cost).
+# Real entry mechanics already trade the actual 50pt-interval OTM1 spread via
+# broker offset resolution; this is only used to estimate rupee P&L for the
+# trade log / ongoing Sharpe-PF-WR tracking (2026-07-18), not the exit decision.
+SPREAD_WIDTH  = 50
+SPREAD_COST   = SPREAD_WIDTH * 0.15  # 7.5 pts
+
+# Capital-based sizing (2026-07-18, Karan-confirmed): 35% of allocated capital
+# risked per trade -- bull + bear can both fire the same day (2 concurrent
+# positions max), so 2 x 35% = 70% deployed, leaving 10pts of headroom under
+# the 80% deployment cap for margin fluctuation/slippage rather than landing
+# exactly on it. Risk per lot is bounded at SPREAD_COST (the debit paid) by
+# construction of the adopted spread structure -- max loss per lot = SPREAD_COST x LOT_SIZE.
+SIZING_PCT    = 0.35
 
 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 
@@ -157,16 +181,26 @@ def get_multiquotes(symbols):
         raise RuntimeError(data)
     return {res["symbol"]: float(res["data"]["ltp"]) for res in data["results"]}
 
-def place_order(symbol, action):
+def compute_lot_quantity():
+    """Capital-based sizing (2026-07-18): risk_budget = allocated_capital x
+    SIZING_PCT, converted to whole lots against SPREAD_COST (the bounded max
+    loss per lot for the adopted debit-spread structure). Never sizes to
+    zero -- floors at 1 lot even if capital is thin."""
+    allocated_capital = get_allocated_capital("orb_spread")
+    risk_budget = allocated_capital * SIZING_PCT
+    lots = int(risk_budget // (SPREAD_COST * LOT_SIZE))
+    return max(lots, 1) * LOT_SIZE
+
+def place_order(symbol, action, quantity):
     r = requests.post(f"{HOST}/api/v1/placeorder",
                       json={"apikey": API_KEY, "strategy": "orb_spread", "symbol": symbol, "exchange": "NFO",
-                            "action": action, "quantity": LOT_SIZE,
+                            "action": action, "quantity": quantity,
                             "pricetype": "MARKET", "product": "MIS"},
                       headers=_headers(), timeout=15)
     r.raise_for_status()
     return r.json()
 
-def open_spread(option_type):
+def open_spread(option_type, quantity):
     """BUY ATM + SELL OTM1 (50pt-wide debit spread), resolved against
     CURRENT spot -- correct for opening a fresh position.
     Returns (long_symbol, short_symbol, long_ltp, short_ltp)."""
@@ -175,8 +209,8 @@ def open_spread(option_type):
                       json={"apikey": API_KEY, "strategy": "orb_spread", "underlying": "NIFTY",
                             "exchange": "NSE_INDEX", "expiry_date": expiry,
                             "legs": [
-                                {"offset": "ATM", "option_type": option_type, "action": "BUY", "quantity": LOT_SIZE},
-                                {"offset": SHORT_OFFSET, "option_type": option_type, "action": "SELL", "quantity": LOT_SIZE},
+                                {"offset": "ATM", "option_type": option_type, "action": "BUY", "quantity": quantity},
+                                {"offset": SHORT_OFFSET, "option_type": option_type, "action": "SELL", "quantity": quantity},
                             ]},
                       headers=_headers(), timeout=20)
     r.raise_for_status()
@@ -188,12 +222,37 @@ def open_spread(option_type):
     quotes = get_multiquotes([(long_sym, "NFO"), (short_sym, "NFO")])
     return long_sym, short_sym, quotes[long_sym], quotes[short_sym]
 
-def close_spread(long_symbol, short_symbol):
+def close_spread(long_symbol, short_symbol, quantity):
     """Close both legs using their EXACT entry symbols -- NOT re-resolved
     offsets, since spot has moved since entry (that's why we're exiting)
-    and re-resolving ATM/OTM1 now could target a different strike."""
-    place_order(long_symbol, "SELL")
-    place_order(short_symbol, "BUY")
+    and re-resolving ATM/OTM1 now could target a different strike. Quantity
+    must match what was actually entered (position sizing is no longer a
+    fixed constant -- see compute_lot_quantity)."""
+    place_order(long_symbol, "SELL", quantity)
+    place_order(short_symbol, "BUY", quantity)
+
+
+def log_closed_trade(direction, reason, pos, spot, pnl_pts, now):
+    """Estimate rupee P&L via the adopted spread payoff model and append to
+    the trade log (paper AND live) for ongoing Sharpe/PF/win-rate/avg-P&L
+    tracking (2026-07-18). Live mode also compounds pnl_rupees into
+    allocated_capital -- see capital_state.py."""
+    spread_pnl_pts = min(max(pnl_pts, 0), SPREAD_WIDTH) - SPREAD_COST
+    qty = pos.get("quantity", LOT_SIZE)
+    pnl_rupees = spread_pnl_pts * qty
+    record_trade("orb_spread", {
+        "date": now.strftime("%Y-%m-%d"),
+        "entry_time": pos["entry_time"],
+        "direction": direction,
+        "signal": pos["signal"],
+        "entry_spot": round(pos["entry_spot"], 2),
+        "exit_time": now.isoformat(),
+        "exit_spot": round(spot, 2),
+        "pnl_pts": round(pnl_pts, 2),
+        "spread_pnl_pts": round(spread_pnl_pts, 2),
+        "pnl_rupees": round(pnl_rupees, 2),
+        "reason": reason,
+    }, pnl_rupees)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -267,16 +326,19 @@ def main():
             pnl_pts    = (entry_spot - spot) * sign  # bear profits on spot falling, bull on spot rising
 
             if pnl_pts >= TARGET_PTS:
-                close_spread(pos["long_symbol"], pos["short_symbol"])
+                close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
                 log.info(f"EXIT TARGET {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} (+{pnl_pts:.1f}pts)")
+                log_closed_trade(direction, "TARGET", pos, spot, pnl_pts, now)
                 state[f"{direction}_position"] = None
             elif pnl_pts <= -STOP_PTS:
-                close_spread(pos["long_symbol"], pos["short_symbol"])
+                close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
                 log.info(f"EXIT STOP {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts)")
+                log_closed_trade(direction, "STOP", pos, spot, pnl_pts, now)
                 state[f"{direction}_position"] = None
             elif t >= HARD_EXIT:
-                close_spread(pos["long_symbol"], pos["short_symbol"])
+                close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
                 log.info(f"EXIT HARD {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts)")
+                log_closed_trade(direction, "HARD_EXIT", pos, spot, pnl_pts, now)
                 state[f"{direction}_position"] = None
             else:
                 # Informational net-value check (not the exit decision)
@@ -333,15 +395,21 @@ def main():
         # ── Enter Bear Put Spread ─────────────────────────────────────────────
         if bear_signal and not state["bear_traded"] and not state["bear_position"]:
             try:
-                long_sym, short_sym, long_ltp, short_ltp = open_spread("PE")
+                quantity = compute_lot_quantity()
+                long_sym, short_sym, long_ltp, short_ltp = open_spread("PE", quantity)
                 net_debit = long_ltp - short_ltp
                 log.info(f"ENTRY BEAR PUT SPREAD {bear_signal} | +{long_sym} -{short_sym} | "
-                         f"spot={spot:.2f} | net_debit={net_debit:.2f}")
+                         f"spot={spot:.2f} | net_debit={net_debit:.2f} | qty={quantity}")
+                if net_debit > SPREAD_COST * 1.5:
+                    log.warning(f"Real net_debit {net_debit:.2f} is well above the {SPREAD_COST:.1f}pt "
+                                f"sizing assumption -- actual capital committed this trade "
+                                f"(~Rs {net_debit * quantity:,.0f}) exceeds the intended risk budget.")
                 state["bear_traded"]   = True
                 state["bear_position"] = {
                     "long_symbol": long_sym, "short_symbol": short_sym,
                     "entry_spot": spot, "entry_net_debit": net_debit,
                     "entry_time": now.isoformat(), "signal": bear_signal,
+                    "quantity": quantity,
                 }
             except Exception as e:
                 log.error(f"Bear entry failed: {e}")
@@ -349,15 +417,21 @@ def main():
         # ── Enter Bull Call Spread ─────────────────────────────────────────────
         if bull_signal and not state["bull_traded"] and not state["bull_position"]:
             try:
-                long_sym, short_sym, long_ltp, short_ltp = open_spread("CE")
+                quantity = compute_lot_quantity()
+                long_sym, short_sym, long_ltp, short_ltp = open_spread("CE", quantity)
                 net_debit = long_ltp - short_ltp
                 log.info(f"ENTRY BULL CALL SPREAD {bull_signal} | +{long_sym} -{short_sym} | "
-                         f"spot={spot:.2f} | net_debit={net_debit:.2f}")
+                         f"spot={spot:.2f} | net_debit={net_debit:.2f} | qty={quantity}")
+                if net_debit > SPREAD_COST * 1.5:
+                    log.warning(f"Real net_debit {net_debit:.2f} is well above the {SPREAD_COST:.1f}pt "
+                                f"sizing assumption -- actual capital committed this trade "
+                                f"(~Rs {net_debit * quantity:,.0f}) exceeds the intended risk budget.")
                 state["bull_traded"]   = True
                 state["bull_position"] = {
                     "long_symbol": long_sym, "short_symbol": short_sym,
                     "entry_spot": spot, "entry_net_debit": net_debit,
                     "entry_time": now.isoformat(), "signal": bull_signal,
+                    "quantity": quantity,
                 }
             except Exception as e:
                 log.error(f"Bull entry failed: {e}")
