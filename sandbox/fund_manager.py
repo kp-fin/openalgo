@@ -424,6 +424,14 @@ class FundManager:
                     return Decimal(get_config("equity_mis_leverage", "5"))
                 elif product == "CNC":
                     return Decimal(get_config("equity_cnc_leverage", "1"))
+                elif product == "MTF":
+                    from sandbox.mtf_leverage_table import MTF_LEVERAGE_BY_SYMBOL
+
+                    per_symbol = MTF_LEVERAGE_BY_SYMBOL.get(symbol)
+                    if per_symbol is not None:
+                        return Decimal(str(per_symbol))
+                    # Fallback for symbols outside the surveyed Nifty 100
+                    return Decimal(get_config("equity_mtf_leverage", "4.35"))
                 else:  # NRML
                     return Decimal(get_config("equity_cnc_leverage", "1"))
 

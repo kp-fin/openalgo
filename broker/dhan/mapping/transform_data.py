@@ -150,6 +150,7 @@ def map_product_type(product):
         "CNC": "CNC",
         "NRML": "MARGIN",
         "MIS": "INTRADAY",
+        "MTF": "MTF",
     }
     return product_type_mapping.get(product, "INTRADAY")  # Default to INTRADAY if not found
 
@@ -159,6 +160,6 @@ def reverse_map_product_type(product):
     Reverse maps the broker product type to the OpenAlgo product type, considering the exchange.
     """
     # Exchange to OpenAlgo product type mapping for 'D'
-    product_mapping = {"CNC": "CNC", "MARGIN": "NRML", "MIS": "INTRADAY"}
+    product_mapping = {"CNC": "CNC", "MARGIN": "NRML", "MIS": "INTRADAY", "MTF": "MTF"}
 
     return product_mapping.get(product)  # Removed default; will return None if not found

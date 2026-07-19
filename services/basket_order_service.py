@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from database.auth_db import get_auth_token_broker
 from database.settings_db import get_analyze_mode
 from events import AnalyzerErrorEvent, BasketCompletedEvent, OrderFailedEvent
+from utils.broker_capabilities import validate_product_for_broker
 from utils.constants import (
     REQUIRED_ORDER_FIELDS,
     VALID_ACTIONS,
@@ -180,6 +181,11 @@ def process_basket_order_with_auth(
         basket_request_data.pop("apikey", None)
 
     api_key = basket_data.get("apikey")
+
+    for leg in basket_data.get("orders", []):
+        ok, error_message = validate_product_for_broker(broker, leg.get("product"))
+        if not ok:
+            return False, {"status": "error", "message": error_message}, 400
 
     # If in analyze mode, route each order to sandbox
     if get_analyze_mode():

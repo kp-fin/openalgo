@@ -60,7 +60,7 @@ export interface PlaceOrderNodeData {
   action: 'BUY' | 'SELL'
   quantity: number
   priceType: 'MARKET' | 'LIMIT' | 'SL' | 'SL-M'
-  product: 'MIS' | 'CNC' | 'NRML'
+  product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   price?: number
   triggerPrice?: number
   disclosedQuantity?: number
@@ -76,7 +76,7 @@ export interface SmartOrderNodeData {
   quantity: number
   positionSize: number
   priceType: 'MARKET' | 'LIMIT' | 'SL' | 'SL-M'
-  product: 'MIS' | 'CNC' | 'NRML'
+  product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   price?: number
   triggerPrice?: number
   ltp?: number
@@ -133,7 +133,7 @@ export interface BasketOrderNodeData {
     action: 'BUY' | 'SELL'
     quantity: number
     priceType: 'MARKET' | 'LIMIT'
-    product: 'MIS' | 'CNC' | 'NRML'
+    product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
     price?: number
   }>
 }
@@ -147,7 +147,7 @@ export interface SplitOrderNodeData {
   quantity: number
   splitSize: number
   priceType: 'MARKET' | 'LIMIT'
-  product: 'MIS' | 'CNC' | 'NRML'
+  product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   price?: number
   delayMs?: number
 }
@@ -161,7 +161,7 @@ export interface ModifyOrderNodeData {
   action: 'BUY' | 'SELL'
   newQuantity?: number
   priceType?: 'MARKET' | 'LIMIT' | 'SL' | 'SL-M'
-  product?: 'MIS' | 'CNC' | 'NRML'
+  product?: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   newPrice?: number
   newTriggerPrice?: number
 }
@@ -205,7 +205,7 @@ export interface PositionCheckNodeData {
   label?: string
   symbol: string
   exchange: string
-  product: 'MIS' | 'CNC' | 'NRML'
+  product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   condition:
     | 'exists'
     | 'not_exists'
@@ -345,7 +345,7 @@ export interface OpenPositionNodeData {
   label?: string
   symbol: string
   exchange: string
-  product: 'MIS' | 'CNC' | 'NRML'
+  product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   outputVariable?: string
 }
 
@@ -494,7 +494,7 @@ export interface MarginNodeData {
     exchange: string
     action: 'BUY' | 'SELL'
     quantity: number
-    product: 'MIS' | 'CNC' | 'NRML'
+    product: 'MIS' | 'CNC' | 'NRML' | 'MTF'
     priceType: 'MARKET' | 'LIMIT'
   }>
   outputVariable?: string

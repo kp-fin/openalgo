@@ -31,7 +31,7 @@ class OrderSchema(Schema):
     pricetype = fields.Str(
         missing="MARKET", validate=validate.OneOf(["MARKET", "LIMIT", "SL", "SL-M"])
     )
-    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
     price = fields.Float(
         missing=0.0, validate=validate.Range(min=0, error="Price must be a non-negative number.")
     )
@@ -66,7 +66,7 @@ class SmartOrderSchema(Schema):
     pricetype = fields.Str(
         missing="MARKET", validate=validate.OneOf(["MARKET", "LIMIT", "SL", "SL-M"])
     )
-    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
     price = fields.Float(
         missing=0.0, validate=validate.Range(min=0, error="Price must be a non-negative number.")
     )
@@ -91,7 +91,7 @@ class ModifyOrderSchema(Schema):
     symbol = fields.Str(required=True)
     orderid = fields.Str(required=True)
     action = fields.Str(required=True, validate=validate.OneOf(["BUY", "SELL", "buy", "sell"]))
-    product = fields.Str(required=True, validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(required=True, validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
     pricetype = fields.Str(
         required=True, validate=validate.OneOf(["MARKET", "LIMIT", "SL", "SL-M"])
     )
@@ -141,7 +141,7 @@ class BasketOrderItemSchema(Schema):
     pricetype = fields.Str(
         missing="MARKET", validate=validate.OneOf(["MARKET", "LIMIT", "SL", "SL-M"])
     )
-    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
     price = fields.Float(
         missing=0.0, validate=validate.Range(min=0, error="Price must be a non-negative number.")
     )
@@ -184,7 +184,7 @@ class SplitOrderSchema(Schema):
     pricetype = fields.Str(
         missing="MARKET", validate=validate.OneOf(["MARKET", "LIMIT", "SL", "SL-M"])
     )
-    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(missing="MIS", validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
     price = fields.Float(
         missing=0.0, validate=validate.Range(min=0, error="Price must be a non-negative number.")
     )
@@ -328,7 +328,7 @@ class MarginPositionSchema(Schema):
     )
     action = fields.Str(required=True, validate=validate.OneOf(["BUY", "SELL", "buy", "sell"]))
     quantity = fields.Str(required=True)  # String to match API contract, validated in service layer
-    product = fields.Str(required=True, validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(required=True, validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
     pricetype = fields.Str(
         required=True, validate=validate.OneOf(["MARKET", "LIMIT", "SL", "SL-M"])
     )

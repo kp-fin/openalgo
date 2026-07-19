@@ -90,7 +90,7 @@ class SandboxOrders(Base):
         ),
         CheckConstraint("action IN ('BUY', 'SELL')", name="check_action"),
         CheckConstraint("price_type IN ('MARKET', 'LIMIT', 'SL', 'SL-M')", name="check_price_type"),
-        CheckConstraint("product IN ('CNC', 'NRML', 'MIS')", name="check_product"),
+        CheckConstraint("product IN ('CNC', 'NRML', 'MIS', 'MTF')", name="check_product"),
     )
 
 
@@ -462,6 +462,11 @@ def init_default_config():
             "config_key": "equity_cnc_leverage",
             "config_value": "1",
             "description": "Leverage multiplier for equity CNC (NSE/BSE) - Range: 1-50x",
+        },
+        {
+            "config_key": "equity_mtf_leverage",
+            "config_value": "4.35",
+            "description": "Fallback leverage for equity MTF symbols not in sandbox/mtf_leverage_table.py's per-symbol survey data - Range: 1-50x",
         },
         {
             "config_key": "futures_leverage",

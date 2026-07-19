@@ -58,13 +58,14 @@ def map_product_type_for_margin(product):
     """
     Maps OpenAlgo product type to Dhan product type for margin calculation.
 
-    OpenAlgo: CNC, NRML, MIS
+    OpenAlgo: CNC, NRML, MIS, MTF
     Dhan: CNC, MARGIN, INTRADAY, MTF, CO, BO
     """
     product_type_mapping = {
         "CNC": "CNC",
         "NRML": "MARGIN",
         "MIS": "INTRADAY",
+        "MTF": "MTF",
     }
     return product_type_mapping.get(product, "INTRADAY")
 

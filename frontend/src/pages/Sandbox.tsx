@@ -69,7 +69,7 @@ function formatConfigLabel(key: string): string {
     .map((word) => {
       const upper = word.toUpperCase()
       if (
-        ['NSE', 'BSE', 'CDS', 'BCD', 'MCX', 'NCDEX', 'NCO', 'MIS', 'CNC', 'NRML'].includes(upper)
+        ['NSE', 'BSE', 'CDS', 'BCD', 'MCX', 'NCDEX', 'NCO', 'MIS', 'CNC', 'NRML', 'MTF'].includes(upper)
       ) {
         return upper
       }

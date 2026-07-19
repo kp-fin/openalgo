@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from database.auth_db import get_auth_token_broker
 from database.settings_db import get_analyze_mode
 from events import AnalyzerErrorEvent, OrderFailedEvent, SplitCompletedEvent
+from utils.broker_capabilities import validate_product_for_broker
 from utils.constants import (
     REQUIRED_ORDER_FIELDS,
     VALID_ACTIONS,
@@ -161,6 +162,10 @@ def split_order_with_auth(
     split_request_data = copy.deepcopy(original_data)
     if "apikey" in split_request_data:
         split_request_data.pop("apikey", None)
+
+    ok, error_message = validate_product_for_broker(broker, split_data.get("product"))
+    if not ok:
+        return False, {"status": "error", "message": error_message}, 400
 
     # Validate quantities
     try:

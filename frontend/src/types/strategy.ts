@@ -21,7 +21,7 @@ export interface StrategySymbolMapping {
   symbol: string
   exchange: string
   quantity: number
-  product_type: 'MIS' | 'CNC' | 'NRML'
+  product_type: 'MIS' | 'CNC' | 'NRML' | 'MTF'
   created_at: string
 }
 
@@ -74,7 +74,7 @@ export const DERIVATIVE_EXCHANGES = ['NFO', 'CDS', 'BFO', 'BCD', 'MCX', 'NCDEX',
 
 export function getProductTypes(exchange: string): string[] {
   if (EQUITY_EXCHANGES.includes(exchange as (typeof EQUITY_EXCHANGES)[number])) {
-    return ['MIS', 'CNC']
+    return ['MIS', 'CNC', 'MTF']
   }
   return ['MIS', 'NRML']
 }

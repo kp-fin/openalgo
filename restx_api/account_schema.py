@@ -32,7 +32,7 @@ class OpenPositionSchema(Schema):
     strategy = fields.Str(required=True)
     symbol = fields.Str(required=True)
     exchange = fields.Str(required=True)
-    product = fields.Str(required=True, validate=validate.OneOf(["MIS", "NRML", "CNC"]))
+    product = fields.Str(required=True, validate=validate.OneOf(["MIS", "NRML", "CNC", "MTF"]))
 
 
 class AnalyzerSchema(Schema):

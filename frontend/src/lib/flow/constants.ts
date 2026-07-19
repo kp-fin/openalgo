@@ -35,6 +35,7 @@ export const PRODUCT_TYPES = [
   { value: 'MIS', label: 'MIS', description: 'Intraday (auto square-off)' },
   { value: 'CNC', label: 'CNC', description: 'Cash & Carry for equity delivery' },
   { value: 'NRML', label: 'NRML', description: 'Normal for futures and options' },
+  { value: 'MTF', label: 'MTF', description: 'Margin Trading Facility for equity delivery (Dhan only)' },
 ] as const
 
 export const PRICE_TYPES = [

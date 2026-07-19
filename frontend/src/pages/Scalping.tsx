@@ -1461,10 +1461,11 @@ export default function Scalping() {
                 </SelectTrigger>
                 <SelectContent>
                   {/* Raw OpenAlgo product codes (docs/prompt/order-constants.md):
-                      MIS / NRML / CNC — not Intraday/Margin/Delivery. */}
+                      MIS / NRML / CNC / MTF — not Intraday/Margin/Delivery. */}
                   <SelectItem value="MIS">MIS</SelectItem>
                   {segment !== 'EQUITY' && <SelectItem value="NRML">NRML</SelectItem>}
                   {segment === 'EQUITY' && <SelectItem value="CNC">CNC</SelectItem>}
+                  {segment === 'EQUITY' && <SelectItem value="MTF">MTF</SelectItem>}
                 </SelectContent>
               </Select>
             </div>

@@ -1121,8 +1121,8 @@ class OrderManager:
             return False, "Invalid price_type. Must be MARKET, LIMIT, SL, or SL-M"
 
         # Validate product
-        if order_data["product"].upper() not in ["CNC", "NRML", "MIS"]:
-            return False, "Invalid product. Must be CNC, NRML, or MIS"
+        if order_data["product"].upper() not in ["CNC", "NRML", "MIS", "MTF"]:
+            return False, "Invalid product. Must be CNC, NRML, MIS, or MTF"
 
         # Validate product-exchange compatibility
         exchange = order_data["exchange"].upper()
@@ -1138,10 +1138,10 @@ class OrderManager:
 
         # Derivatives exchanges (F&O, Commodity, Currency): Only NRML and MIS allowed
         if exchange in ["NFO", "BFO", "MCX", "CDS", "BCD", "NCDEX", "CRYPTO"]:
-            if product == "CNC":
+            if product in ("CNC", "MTF"):
                 return (
                     False,
-                    f"CNC product not allowed for {exchange} derivatives segment. Use NRML for carryforward or MIS for intraday.",
+                    f"{product} product not allowed for {exchange} derivatives segment. Use NRML for carryforward or MIS for intraday.",
                 )
 
         # Validate quantity

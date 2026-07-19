@@ -85,7 +85,7 @@ def create_all_tables(conn):
             price DECIMAL(10, 2),
             trigger_price DECIMAL(10, 2),
             price_type VARCHAR(20) NOT NULL CHECK(price_type IN ('MARKET', 'LIMIT', 'SL', 'SL-M')),
-            product VARCHAR(20) NOT NULL CHECK(product IN ('CNC', 'NRML', 'MIS')),
+            product VARCHAR(20) NOT NULL CHECK(product IN ('CNC', 'NRML', 'MIS', 'MTF')),
             order_status VARCHAR(20) NOT NULL DEFAULT 'open' CHECK(order_status IN ('open', 'complete', 'cancelled', 'rejected')),
             average_price DECIMAL(10, 2),
             filled_quantity INTEGER DEFAULT 0,
@@ -293,6 +293,59 @@ def add_missing_columns(conn):
     conn.commit()
 
 
+def fix_product_check_constraint(conn):
+    """Widen sandbox_orders' product CHECK constraint to allow MTF.
+
+    SQLite has no ALTER TABLE support for modifying a CHECK constraint, so
+    an already-created sandbox_orders table (from before MTF support was
+    added) must be recreated: rename the old table, create a fresh one with
+    the widened constraint, copy the data across, then drop the old table.
+    Safe to run repeatedly -- skipped if the constraint already allows MTF.
+    """
+    result = conn.execute(
+        text("SELECT sql FROM sqlite_master WHERE type='table' AND name='sandbox_orders'")
+    )
+    row = result.fetchone()
+    if row is None:
+        return  # table doesn't exist yet -- create_all_tables() will make it with MTF already
+    if "MTF" in row[0]:
+        logger.info("sandbox_orders product CHECK constraint already allows MTF, skipping")
+        return
+
+    logger.info("Recreating sandbox_orders to widen the product CHECK constraint for MTF...")
+    conn.execute(text("ALTER TABLE sandbox_orders RENAME TO sandbox_orders_old"))
+    conn.execute(
+        text("""
+        CREATE TABLE sandbox_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            orderid VARCHAR(50) UNIQUE NOT NULL,
+            user_id VARCHAR(50) NOT NULL,
+            strategy VARCHAR(100),
+            symbol VARCHAR(50) NOT NULL,
+            exchange VARCHAR(20) NOT NULL,
+            action VARCHAR(10) NOT NULL CHECK(action IN ('BUY', 'SELL')),
+            quantity INTEGER NOT NULL,
+            price DECIMAL(10, 2),
+            trigger_price DECIMAL(10, 2),
+            price_type VARCHAR(20) NOT NULL CHECK(price_type IN ('MARKET', 'LIMIT', 'SL', 'SL-M')),
+            product VARCHAR(20) NOT NULL CHECK(product IN ('CNC', 'NRML', 'MIS', 'MTF')),
+            order_status VARCHAR(20) NOT NULL DEFAULT 'open' CHECK(order_status IN ('open', 'complete', 'cancelled', 'rejected')),
+            average_price DECIMAL(10, 2),
+            filled_quantity INTEGER DEFAULT 0,
+            pending_quantity INTEGER NOT NULL,
+            rejection_reason TEXT,
+            margin_blocked DECIMAL(10, 2) DEFAULT 0.00,
+            order_timestamp DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+            update_timestamp DATETIME NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+        )
+    """)
+    )
+    conn.execute(text("INSERT INTO sandbox_orders SELECT * FROM sandbox_orders_old"))
+    conn.execute(text("DROP TABLE sandbox_orders_old"))
+    conn.commit()
+    logger.info("✅ sandbox_orders recreated with MTF-inclusive product CHECK constraint")
+
+
 def insert_default_config(conn):
     """Insert default configuration values"""
 
@@ -322,6 +375,7 @@ def insert_default_config(conn):
         ("ncdex_square_off_time", "17:00", "Square-off time for NCDEX MIS positions (IST)"),
         ("equity_mis_leverage", "5", "Leverage multiplier for equity MIS (NSE/BSE) - Range: 1-50x"),
         ("equity_cnc_leverage", "1", "Leverage multiplier for equity CNC (NSE/BSE) - Range: 1-50x"),
+        ("equity_mtf_leverage", "4.35", "Fallback leverage for equity MTF symbols not in sandbox/mtf_leverage_table.py's per-symbol survey data - Range: 1-50x"),
         (
             "futures_leverage",
             "10",
@@ -377,6 +431,9 @@ def upgrade():
         with engine.connect() as conn:
             # Create all tables
             create_all_tables(conn)
+
+            # Widen product CHECK constraint on an already-existing sandbox_orders (MTF support)
+            fix_product_check_constraint(conn)
 
             # Create all indexes
             create_all_indexes(conn)

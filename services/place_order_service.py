@@ -6,6 +6,7 @@ from database.auth_db import get_auth_token_broker
 from database.settings_db import get_analyze_mode
 from events import AnalyzerErrorEvent, OrderFailedEvent, OrderPlacedEvent
 from restx_api.schemas import OrderSchema
+from utils.broker_capabilities import validate_product_for_broker
 from utils.constants import (
     REQUIRED_ORDER_FIELDS,
     VALID_ACTIONS,
@@ -144,6 +145,10 @@ def place_order_with_auth(
         order_request_data.pop("apikey", None)
 
     api_key = original_data.get("apikey", "")
+
+    ok, error_message = validate_product_for_broker(broker, order_data.get("product"))
+    if not ok:
+        return False, {"status": "error", "message": error_message}, 400
 
     # If in analyze mode, route to sandbox for sandbox trading
     if get_analyze_mode():

@@ -2,7 +2,7 @@
 // Order constants mirror OpenAlgo (docs/prompt/order-constants.md).
 
 export type OptionType = 'CE' | 'PE'
-export type ScalpingProduct = 'MIS' | 'NRML' | 'CNC'
+export type ScalpingProduct = 'MIS' | 'NRML' | 'CNC' | 'MTF'
 export type ScalpingAction = 'BUY' | 'SELL'
 export type Segment = 'OPTIONS' | 'FUTURES' | 'EQUITY'
 

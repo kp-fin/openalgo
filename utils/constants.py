@@ -70,8 +70,9 @@ VALID_EXCHANGES = [
 PRODUCT_CNC = "CNC"  # Cash & Carry for equity
 PRODUCT_NRML = "NRML"  # Normal for futures and options
 PRODUCT_MIS = "MIS"  # Intraday Square off
+PRODUCT_MTF = "MTF"  # Margin Trading Facility (equity delivery, margin-funded) -- Dhan only so far, see utils/broker_capabilities.py
 
-VALID_PRODUCT_TYPES = [PRODUCT_CNC, PRODUCT_NRML, PRODUCT_MIS]
+VALID_PRODUCT_TYPES = [PRODUCT_CNC, PRODUCT_NRML, PRODUCT_MIS, PRODUCT_MTF]
 
 # Price Types
 PRICE_TYPE_MARKET = "MARKET"  # Market Order

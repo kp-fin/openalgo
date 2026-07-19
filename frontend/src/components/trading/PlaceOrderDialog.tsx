@@ -46,6 +46,7 @@ const FNO_PRODUCT_TYPES = [
 const EQUITY_PRODUCT_TYPES = [
   { value: 'CNC', label: 'CNC' },
   { value: 'MIS', label: 'MIS' },
+  { value: 'MTF', label: 'MTF' },
 ] as const
 
 export interface PlaceOrderDialogProps {
@@ -139,8 +140,8 @@ export function PlaceOrderDialog({
       // Set default product based on exchange, validate initialProduct is valid for exchange
       const isFnO = isFnOExchange(exchange)
       const defaultProduct = isFnO ? 'NRML' : 'CNC'
-      // Validate product: CNC not valid for F&O, NRML not valid for equity
-      const validProducts = isFnO ? ['NRML', 'MIS'] : ['CNC', 'MIS']
+      // Validate product: CNC/MTF not valid for F&O, NRML not valid for equity
+      const validProducts = isFnO ? ['NRML', 'MIS'] : ['CNC', 'MIS', 'MTF']
       const productToUse =
         initialProduct && validProducts.includes(initialProduct) ? initialProduct : defaultProduct
       setFormProduct(productToUse)

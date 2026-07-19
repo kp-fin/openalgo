@@ -142,6 +142,7 @@ const PRODUCT_COLORS: Record<string, string> = {
   CNC: 'bg-purple-500/20 text-purple-600 border-purple-500/30',
   MIS: 'bg-cyan-500/20 text-cyan-600 border-cyan-500/30',
   NRML: 'bg-slate-500/20 text-slate-600 border-slate-500/30',
+  MTF: 'bg-amber-500/20 text-amber-600 border-amber-500/30',
 }
 
 export default function Positions() {
@@ -290,6 +291,7 @@ export default function Positions() {
       if (exchange === 'NSE' || exchange === 'BSE') {
         if (product === 'CNC') return 'Equity (Delivery)'
         if (product === 'MIS') return 'Equity (Intraday)'
+        if (product === 'MTF') return 'Equity (MTF)'
       }
 
       const parsed = parseSymbol(pos.symbol, exchange)
@@ -698,6 +700,7 @@ export default function Positions() {
                       <FilterChip type="product" value="CNC" label="CNC" />
                       <FilterChip type="product" value="MIS" label="MIS" />
                       <FilterChip type="product" value="NRML" label="NRML" />
+                      <FilterChip type="product" value="MTF" label="MTF" />
                     </div>
                   </div>
                 )}

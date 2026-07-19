@@ -1133,6 +1133,7 @@ def validate_order_constants() -> str:
             "CNC": "Cash & Carry for equity",
             "NRML": "Normal for futures and options",
             "MIS": "Intraday Square off",
+            "MTF": "Margin Trading Facility (equity delivery, margin-funded, Dhan only)",
         },
         "price_types": {
             "MARKET": "Market Order",

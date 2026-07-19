@@ -10,6 +10,7 @@ from events import (
     OrderPlacedEvent,
     SmartOrderNoActionEvent,
 )
+from utils.broker_capabilities import validate_product_for_broker
 from utils.constants import (
     REQUIRED_SMART_ORDER_FIELDS,
     VALID_ACTIONS,
@@ -144,6 +145,10 @@ def place_smart_order_with_auth(
             error_message=error_message,
         ))
         return False, error_response, 400
+
+    ok, product_error = validate_product_for_broker(broker, order_data.get("product"))
+    if not ok:
+        return False, {"status": "error", "message": product_error}, 400
 
     # If in analyze mode, route to sandbox for sandbox trading
     if get_analyze_mode():

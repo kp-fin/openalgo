@@ -5,6 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 from database.auth_db import get_auth_token_broker
 from database.settings_db import get_analyze_mode
 from events import AnalyzerErrorEvent, OrderModifiedEvent, OrderModifyFailedEvent
+from utils.broker_capabilities import validate_product_for_broker
 from utils.event_bus import bus
 from utils.logging import get_logger
 
@@ -82,6 +83,10 @@ def modify_order_with_auth(
     order_request_data = copy.deepcopy(original_data)
     if "apikey" in order_request_data:
         order_request_data.pop("apikey", None)
+
+    ok, error_message = validate_product_for_broker(broker, order_data.get("product"))
+    if not ok:
+        return False, {"status": "error", "message": error_message}, 400
 
     # If in analyze mode, route to sandbox for sandbox trading
     if get_analyze_mode():
