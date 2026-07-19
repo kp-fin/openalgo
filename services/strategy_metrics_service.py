@@ -13,6 +13,7 @@ is simpler/safer than incremental aggregation. Writes a single markdown
 report to the vault, overwritten each run (not one file per day).
 """
 
+import itertools
 import json
 import os
 from datetime import datetime
@@ -40,6 +41,10 @@ STRATEGIES = {
     "ema_regime_crossover": {
         "name": "EMA Regime Crossover",
         "spec": "equities-system/strategies/ema_regime_crossover.md",
+    },
+    "ema_regime_crossover_swing": {
+        "name": "EMA Regime Crossover — Swing",
+        "spec": "equities-system/strategies/ema_regime_crossover_swing.md",
     },
 }
 
@@ -135,10 +140,12 @@ def _gate_note(n_trades):
 
 def build_report() -> str:
     metrics = {key: compute_strategy_metrics(key) for key in STRATEGIES}
-    corr = compute_correlation(
-        metrics["orb_spread"]["daily_returns"],
-        metrics["ema_regime_crossover"]["daily_returns"],
-    )
+    # All-pairs correlation -- generalized from an original hardcoded 2-strategy
+    # comparison once a 3rd strategy (ema_regime_crossover_swing) existed.
+    correlations = {
+        (a, b): compute_correlation(metrics[a]["daily_returns"], metrics[b]["daily_returns"])
+        for a, b in itertools.combinations(STRATEGIES, 2)
+    }
 
     lines = [
         "# Portfolio Tracking — Ongoing Sharpe, PF, Win Rate, Avg P&L, Correlation",
@@ -173,18 +180,22 @@ def build_report() -> str:
 
     lines += [
         "",
-        "## Cross-Strategy Correlation (ORB_Spread vs EMA Regime Crossover)",
+        "## Cross-Strategy Correlation (all pairs)",
         "",
     ]
-    if corr["full_history"] is None:
-        lines.append("Not enough overlapping trading days yet to compute correlation.")
-    else:
-        rolling_str = (
-            f"{corr['rolling']:.2f}" if corr["rolling"] is not None
-            else f"Accumulating (need {CORRELATION_WINDOW} overlapping trading days, have {corr['n_days']})"
-        )
-        lines.append(f"- Full-history Pearson correlation (daily returns, {corr['n_days']} overlapping days): **{corr['full_history']:.2f}**")
-        lines.append(f"- Rolling {CORRELATION_WINDOW}-trading-day correlation: **{rolling_str}**")
+    for (a, b), corr in correlations.items():
+        pair_name = f"{STRATEGIES[a]['name']} vs {STRATEGIES[b]['name']}"
+        lines.append(f"**{pair_name}:**")
+        if corr["full_history"] is None:
+            lines.append("- Not enough overlapping trading days yet to compute correlation.")
+        else:
+            rolling_str = (
+                f"{corr['rolling']:.2f}" if corr["rolling"] is not None
+                else f"Accumulating (need {CORRELATION_WINDOW} overlapping trading days, have {corr['n_days']})"
+            )
+            lines.append(f"- Full-history Pearson correlation (daily returns, {corr['n_days']} overlapping days): **{corr['full_history']:.2f}**")
+            lines.append(f"- Rolling {CORRELATION_WINDOW}-trading-day correlation: **{rolling_str}**")
+        lines.append("")
 
     lines += [
         "",
@@ -204,8 +215,8 @@ def build_report() -> str:
         "",
         "---",
         "",
-        f"*See also: [[{STRATEGIES['orb_spread']['spec']}]] · [[{STRATEGIES['ema_regime_crossover']['spec']}]] "
-        f"· [[agents/friday/memory/decisions.md]]*",
+        "*See also: " + " · ".join(f"[[{info['spec']}]]" for info in STRATEGIES.values())
+        + " · [[agents/friday/memory/decisions.md]]*",
     ]
     return "\n".join(lines) + "\n"
 
