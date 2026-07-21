@@ -41,11 +41,20 @@ from capital_state.py's capital_allocation.json each poll -- same shared mechani
 and the intraday EMA Regime Crossover. Live-mode closed trades compound their P&L into
 allocated_capital; paper-mode trades never touch it (capital_state.record_trade() handles this).
 
-Sizing: fixed 12.5% of (allocated_capital x per-symbol MTF leverage) per trade -- POSITION_PCT and
-MAX_CONCURRENT (6) are INHERITED UNCHANGED from the intraday sibling's convention. The swing
-strategy spec flags this as an open item (a ~40-day average hold ties up capital far longer per
-position than intraday MIS turnover) -- not re-examined here, just carried forward as-is until
-Karan revisits it.
+Sizing (corrected 2026-07-21, Karan-confirmed -- replaces the same day's earlier, wrong version,
+same fix as the intraday sibling): POSITION_PCT (10%) is taken from allocated_capital FIRST --
+capital_per_trade = allocated_capital x 10% (Rs 25,000 at the current Rs 2,50,000 base) -- THEN
+the per-symbol MTF leverage is applied on top of that slice: buying_power = capital_per_trade x
+get_mtf_leverage(sym, entry_price). The FULL resulting buying_power is used for qty, no further cap
+layered on. capital_per_trade is the real margin committed to the trade; leverage only changes how
+big a position that margin controls, not how much of it is at risk. The same-day earlier version
+got this backwards (leverage applied to the FULL allocated_capital first, then shrunk back down
+after the fact), which meant real capital committed per trade was Rs 25,000/leverage, not Rs
+25,000. MAX_CONCURRENT (6) is INHERITED UNCHANGED from the intraday sibling's convention -- at 6
+positions x Rs 25,000 capital_per_trade, total margin committed is capped at Rs 1,50,000 (60% of
+allocated capital). The swing strategy spec flags the wider point (a ~40-day average hold ties up
+capital far longer per position than intraday MIS turnover) as an open item -- not re-examined
+here, just carried forward as-is until Karan revisits it.
 
 Per-symbol position limit: implicit via the positions dict being keyed by symbol (no new entry
 if one is already open in that name) -- same live-only divergence from the backtest as the
@@ -113,7 +122,9 @@ STOP_POLLING_TIME = dtime(15, 30)   # stop polling for the day, not a square-off
 POLL_SECONDS       = 15 * 60        # 15 minutes -- lighter than the intraday sibling's 5
 DAILY_LOOKBACK_DAYS = 90            # comfortably covers RS/EMA/ATR warmup with buffer
 
-POSITION_PCT   = 0.125    # inherited unchanged from the intraday sibling -- open item, see docstring
+POSITION_PCT   = 0.10     # of allocated_capital, taken BEFORE leverage -- real capital/margin committed
+                           # per trade (Rs 25,000 at Rs 2,50,000 capital), corrected 2026-07-21, matches
+                           # the intraday sibling's fix
 MAX_CONCURRENT = 6
 
 UNIVERSE_EACH = 10
@@ -355,6 +366,7 @@ def main():
         return "stop"
 
     allocated_capital = get_allocated_capital("ema_regime_crossover_swing")
+    capital_per_trade  = allocated_capital * POSITION_PCT   # real margin per trade -- see module docstring "Sizing"
     state = load_state()
 
     # ── Monthly universe refresh (first poll of a new calendar month) ────────
@@ -446,8 +458,8 @@ def main():
                     continue
 
                 leverage = get_mtf_leverage(sym, entry_price)
-                buying_power = allocated_capital * leverage
-                qty = int((buying_power * POSITION_PCT) // entry_price)
+                buying_power = capital_per_trade * leverage
+                qty = int(buying_power // entry_price)
                 if qty <= 0:
                     continue
 

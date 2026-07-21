@@ -449,9 +449,11 @@ class PositionManager:
                         positions.append(position)
                     # Skip old closed positions with corrupted updated_at
                 # If position was updated before last session expiry, only include NRML with non-zero quantity
-                elif position.product == "NRML" and position.quantity != 0:
+                elif position.product in ("NRML", "MTF") and position.quantity != 0:
                     positions.append(position)
                 # Skip MIS and CNC positions from previous session
+                # Note: MTF (Margin Trading Facility) is a multi-day carry-forward product
+                # and must be included here alongside NRML — it is NOT intraday.
 
             # Check for and auto-close expired F&O contracts
             # This handles NRML positions where the contract has expired

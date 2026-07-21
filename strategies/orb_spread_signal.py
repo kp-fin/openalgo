@@ -88,13 +88,15 @@ STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state"
 SPREAD_WIDTH  = 50
 SPREAD_COST   = SPREAD_WIDTH * 0.15  # 7.5 pts
 
-# Capital-based sizing (2026-07-18, Karan-confirmed): 35% of allocated capital
-# risked per trade -- bull + bear can both fire the same day (2 concurrent
-# positions max), so 2 x 35% = 70% deployed, leaving 10pts of headroom under
-# the 80% deployment cap for margin fluctuation/slippage rather than landing
-# exactly on it. Risk per lot is bounded at SPREAD_COST (the debit paid) by
-# construction of the adopted spread structure -- max loss per lot = SPREAD_COST x LOT_SIZE.
-SIZING_PCT    = 0.35
+# Capital-based sizing (2026-07-18, redesigned 2026-07-21 three times, Karan-
+# confirmed): bull and bear each get their own FIXED, INDEPENDENT capital
+# pool -- (allocated_capital x DEPLOYMENT_CAP_PCT) / 2 each -- rather than
+# sharing one combined pool (that was tried first; replaced same day because
+# whichever signal fired first could claim most/all of a shared pool,
+# starving or zeroing the second same-day entry). Each leg's cap is a
+# fraction of allocated_capital, not a frozen rupee figure, so both scale up
+# automatically as profit compounds in live mode. See compute_lot_quantity().
+DEPLOYMENT_CAP_PCT = 0.80  # max total capital deployed across BOTH positions combined (2 x 40% each), Karan-confirmed 2026-07-21
 
 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 
@@ -181,15 +183,58 @@ def get_multiquotes(symbols):
         raise RuntimeError(data)
     return {res["symbol"]: float(res["data"]["ltp"]) for res in data["results"]}
 
-def compute_lot_quantity():
-    """Capital-based sizing (2026-07-18): risk_budget = allocated_capital x
-    SIZING_PCT, converted to whole lots against SPREAD_COST (the bounded max
-    loss per lot for the adopted debit-spread structure). Never sizes to
-    zero -- floors at 1 lot even if capital is thin."""
+def resolve_option_symbol(option_type, offset, expiry):
+    r = requests.post(f"{HOST}/api/v1/optionsymbol",
+                      json={"apikey": API_KEY, "underlying": "NIFTY", "exchange": "NSE_INDEX",
+                            "expiry_date": expiry, "offset": offset, "option_type": option_type},
+                      headers=_headers(), timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "success":
+        raise RuntimeError(data)
+    return data["symbol"]
+
+def estimate_net_debit(option_type):
+    """Resolve the ATM/OTM1 leg symbols and fetch their live quotes WITHOUT
+    placing an order, so compute_lot_quantity can size against the REAL
+    premium about to be paid, not a fixed assumption."""
+    expiry = get_current_expiry()
+    long_sym = resolve_option_symbol(option_type, "ATM", expiry)
+    short_sym = resolve_option_symbol(option_type, SHORT_OFFSET, expiry)
+    quotes = get_multiquotes([(long_sym, "NFO"), (short_sym, "NFO")])
+    return quotes[long_sym] - quotes[short_sym]
+
+def compute_lot_quantity(net_debit_per_share):
+    """Capital-based sizing (2026-07-18, redesigned 2026-07-21 three times,
+    Karan-confirmed): bull and bear each get their own FIXED, INDEPENDENT
+    capital pool -- (allocated_capital x DEPLOYMENT_CAP_PCT) / 2 -- rather
+    than sharing one combined pool. A shared-pool design was tried first the
+    same day and replaced: whichever signal fired first could claim most/all
+    of the shared amount, starving or zeroing the second same-day entry.
+    Fixing each leg's own pool removes that order-of-arrival risk, at the
+    cost of some capital efficiency on solo-signal days (a lone entry is now
+    capped at half the deployment ceiling, not the full amount -- accepted
+    tradeoff). The per-leg cap is a fraction of allocated_capital, not a
+    frozen rupee figure, so it scales up automatically as profit compounds
+    in live mode, same as everything else in this script.
+
+    Sizes against the REAL live net debit quoted for this entry (see
+    estimate_net_debit), not the backtest's modeled SPREAD_COST=7.5pt
+    assumption -- that assumption silently sized a 35-lot/2275-share order
+    on 2026-07-21 when this function used it directly instead of a real
+    quote. risk_per_share is still floored at SPREAD_COST so an
+    unrealistically cheap quote can't size UP past what the model expects.
+
+    Can return 0 if even 1 lot doesn't fit the per-leg cap at the real
+    quoted premium -- the caller must skip the trade rather than force a
+    minimum entry. No separate MAX_LOTS backstop -- removed 2026-07-21
+    (Karan-confirmed) since it would silently override the capital-based
+    settings; the per-leg capital math above is the sole sizing limit."""
     allocated_capital = get_allocated_capital("orb_spread")
-    risk_budget = allocated_capital * SIZING_PCT
-    lots = int(risk_budget // (SPREAD_COST * LOT_SIZE))
-    return max(lots, 1) * LOT_SIZE
+    per_leg_cap = (allocated_capital * DEPLOYMENT_CAP_PCT) / 2
+    risk_per_share = max(net_debit_per_share, SPREAD_COST)
+    lots = int(per_leg_cap // (risk_per_share * LOT_SIZE))
+    return lots * LOT_SIZE
 
 def place_order(symbol, action, quantity):
     r = requests.post(f"{HOST}/api/v1/placeorder",
@@ -395,44 +440,58 @@ def main():
         # ── Enter Bear Put Spread ─────────────────────────────────────────────
         if bear_signal and not state["bear_traded"] and not state["bear_position"]:
             try:
-                quantity = compute_lot_quantity()
-                long_sym, short_sym, long_ltp, short_ltp = open_spread("PE", quantity)
-                net_debit = long_ltp - short_ltp
-                log.info(f"ENTRY BEAR PUT SPREAD {bear_signal} | +{long_sym} -{short_sym} | "
-                         f"spot={spot:.2f} | net_debit={net_debit:.2f} | qty={quantity}")
-                if net_debit > SPREAD_COST * 1.5:
-                    log.warning(f"Real net_debit {net_debit:.2f} is well above the {SPREAD_COST:.1f}pt "
-                                f"sizing assumption -- actual capital committed this trade "
-                                f"(~Rs {net_debit * quantity:,.0f}) exceeds the intended risk budget.")
-                state["bear_traded"]   = True
-                state["bear_position"] = {
-                    "long_symbol": long_sym, "short_symbol": short_sym,
-                    "entry_spot": spot, "entry_net_debit": net_debit,
-                    "entry_time": now.isoformat(), "signal": bear_signal,
-                    "quantity": quantity,
-                }
+                net_debit_est = estimate_net_debit("PE")
+                quantity = compute_lot_quantity(net_debit_est)
+                if quantity <= 0:
+                    log.info(f"BEAR signal {bear_signal} skipped — even 1 lot doesn't fit "
+                             f"the per-leg capital pool at est net_debit {net_debit_est:.2f}. "
+                             f"Not marking bear_traded -- will retry next tick.")
+                else:
+                    long_sym, short_sym, long_ltp, short_ltp = open_spread("PE", quantity)
+                    net_debit = long_ltp - short_ltp
+                    log.info(f"ENTRY BEAR PUT SPREAD {bear_signal} | +{long_sym} -{short_sym} | "
+                             f"spot={spot:.2f} | net_debit={net_debit:.2f} (sized against est {net_debit_est:.2f}) | qty={quantity}")
+                    if net_debit > net_debit_est * 1.5:
+                        log.warning(f"Real fill net_debit {net_debit:.2f} is well above the {net_debit_est:.2f}pt "
+                                    f"estimate used for sizing -- price moved between the sizing quote and the "
+                                    f"fill; actual capital committed this trade (~Rs {net_debit * quantity:,.0f}) "
+                                    f"may exceed the intended risk budget.")
+                    state["bear_traded"]   = True
+                    state["bear_position"] = {
+                        "long_symbol": long_sym, "short_symbol": short_sym,
+                        "entry_spot": spot, "entry_net_debit": net_debit,
+                        "entry_time": now.isoformat(), "signal": bear_signal,
+                        "quantity": quantity,
+                    }
             except Exception as e:
                 log.error(f"Bear entry failed: {e}")
 
         # ── Enter Bull Call Spread ─────────────────────────────────────────────
         if bull_signal and not state["bull_traded"] and not state["bull_position"]:
             try:
-                quantity = compute_lot_quantity()
-                long_sym, short_sym, long_ltp, short_ltp = open_spread("CE", quantity)
-                net_debit = long_ltp - short_ltp
-                log.info(f"ENTRY BULL CALL SPREAD {bull_signal} | +{long_sym} -{short_sym} | "
-                         f"spot={spot:.2f} | net_debit={net_debit:.2f} | qty={quantity}")
-                if net_debit > SPREAD_COST * 1.5:
-                    log.warning(f"Real net_debit {net_debit:.2f} is well above the {SPREAD_COST:.1f}pt "
-                                f"sizing assumption -- actual capital committed this trade "
-                                f"(~Rs {net_debit * quantity:,.0f}) exceeds the intended risk budget.")
-                state["bull_traded"]   = True
-                state["bull_position"] = {
-                    "long_symbol": long_sym, "short_symbol": short_sym,
-                    "entry_spot": spot, "entry_net_debit": net_debit,
-                    "entry_time": now.isoformat(), "signal": bull_signal,
-                    "quantity": quantity,
-                }
+                net_debit_est = estimate_net_debit("CE")
+                quantity = compute_lot_quantity(net_debit_est)
+                if quantity <= 0:
+                    log.info(f"BULL signal {bull_signal} skipped — even 1 lot doesn't fit "
+                             f"the per-leg capital pool at est net_debit {net_debit_est:.2f}. "
+                             f"Not marking bull_traded -- will retry next tick.")
+                else:
+                    long_sym, short_sym, long_ltp, short_ltp = open_spread("CE", quantity)
+                    net_debit = long_ltp - short_ltp
+                    log.info(f"ENTRY BULL CALL SPREAD {bull_signal} | +{long_sym} -{short_sym} | "
+                             f"spot={spot:.2f} | net_debit={net_debit:.2f} (sized against est {net_debit_est:.2f}) | qty={quantity}")
+                    if net_debit > net_debit_est * 1.5:
+                        log.warning(f"Real fill net_debit {net_debit:.2f} is well above the {net_debit_est:.2f}pt "
+                                    f"estimate used for sizing -- price moved between the sizing quote and the "
+                                    f"fill; actual capital committed this trade (~Rs {net_debit * quantity:,.0f}) "
+                                    f"may exceed the intended risk budget.")
+                    state["bull_traded"]   = True
+                    state["bull_position"] = {
+                        "long_symbol": long_sym, "short_symbol": short_sym,
+                        "entry_spot": spot, "entry_net_debit": net_debit,
+                        "entry_time": now.isoformat(), "signal": bull_signal,
+                        "quantity": quantity,
+                    }
             except Exception as e:
                 log.error(f"Bull entry failed: {e}")
 

@@ -50,15 +50,23 @@ risk), NOT the leveraged buying power -- 2% of current allocated_capital
 (Karan confirmed the 2% figure and the original Rs 15,000 base 2026-07-17;
 the 2% ratio itself doesn't change as capital compounds).
 
-Sizing: fixed 12.5% of buying_power per trade (flat within a given poll, not
-compounded directly -- but buying_power itself now moves with compounding
-allocated_capital, so effective position size scales over time as live P&L
-accrues). Max 6 concurrent positions across the whole universe; skip a new
-signal beyond that cap. At full 6-position concurrency this deploys ~75% of
-buying_power -- Karan's confirmed cap is 80% of real/own capital
-(2026-07-18), and this vault has already empirically validated (2026-07-17
-live trades) that ~75% of buying_power maps to ~75% of real capital at the
-assumed 5x leverage, comfortably under the 80% limit.
+Sizing (corrected 2026-07-21, Karan-confirmed -- replaces the same day's
+earlier, wrong version): POSITION_PCT (10%) is taken from allocated_capital
+FIRST -- capital_per_trade = allocated_capital x 10% (Rs 25,000 at the
+current Rs 2,50,000 base) -- THEN leverage is applied on top of that slice:
+buying_power = capital_per_trade x ASSUMED_MIS_LEVERAGE (Rs 1,25,000 at 5x).
+The FULL resulting buying_power is used for qty, no further cap layered on.
+This is the correct order: capital_per_trade is the real margin committed to
+the trade (leverage doesn't change how much of your own money is at risk,
+only how big a position that money can control). The same-day earlier
+version got this backwards -- it computed buying_power from the FULL
+allocated_capital first, then tried to shrink the leveraged notional back
+down (12.5% of buying_power, then a flat Rs 25,000 cap on that already-
+leveraged number) -- which meant only Rs 25,000/leverage = Rs 5,000 of real
+capital was actually being committed per trade, not Rs 25,000. Max 6
+concurrent positions across the whole universe; skip a new signal beyond
+that cap. At 6 positions x Rs 25,000 capital_per_trade, total margin
+committed is capped at Rs 1,50,000 (60% of allocated capital).
 
 Per-symbol position limit (LIVE-ONLY DIVERGENCE FROM THE BACKTEST):
 the backtest's signal-generation pass does not prevent two independent
@@ -128,7 +136,8 @@ CANDLE_LOOKBACK_DAYS = 60   # comfortably covers 200x30m-bar EMA warmup (~16 tra
 
 ASSUMED_MIS_LEVERAGE = 5          # "up to 5x", varies stock-to-stock per Karan -- planning ceiling only,
                                    # real Dhan MIS margin at order time is the actual gate (see module docstring)
-POSITION_PCT         = 0.125
+POSITION_PCT         = 0.10       # of allocated_capital, taken BEFORE leverage -- this is the real capital/margin
+                                   # committed per trade (Rs 25,000 at Rs 2,50,000 capital), corrected 2026-07-21
 MAX_CONCURRENT       = 6
 DAILY_LOSS_PCT       = 0.02       # of allocated_capital -- sized against real capital at risk, not leveraged buying power
 
@@ -363,7 +372,8 @@ def main():
     # Read fresh each poll -- allocated_capital compounds with live P&L
     # (2026-07-18), so this can't be a module-level constant anymore.
     allocated_capital = get_allocated_capital("ema_regime_crossover")
-    buying_power       = allocated_capital * ASSUMED_MIS_LEVERAGE
+    capital_per_trade  = allocated_capital * POSITION_PCT   # real margin per trade -- see module docstring "Sizing"
+    buying_power       = capital_per_trade * ASSUMED_MIS_LEVERAGE
     daily_loss_limit   = DAILY_LOSS_PCT * allocated_capital
 
     state = load_state()
@@ -508,7 +518,7 @@ def main():
         atr = float(last["atr"])
         if atr <= 0 or np.isnan(atr):
             continue
-        qty = int((buying_power * POSITION_PCT) // entry_price)
+        qty = int(buying_power // entry_price)
         if qty <= 0:
             continue
 
