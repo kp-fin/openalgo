@@ -15,9 +15,24 @@ Nifty Next 50 pool):
                RS_MOMENTUM_SLOPE_LOOKBACK days) -- "accelerating, or moving towards acceleration"
 
 Entry (daily, EMA9/EMA20 crossover): bullish crossover while in BULL regime -> LONG only (the
-long+short backtest showed shorts were a net drag -- dropped 2026-07-19, see the spec). Entry at
-current LTP during the once-daily signal pass (approximates "next day's open", matching the
-backtest's entry-at-next-open convention, since this script runs once per day near market open).
+long+short backtest showed shorts were a net drag -- dropped 2026-07-19, see the spec). Signal is
+read from the LAST COMPLETED daily bar (fixed 2026-07-22 -- see note below), entry at current LTP
+during the once-daily signal pass, which approximates "next day's open" matching the backtest's
+entry-at-next-open convention since this script runs once per day near market open.
+
+FIXED 2026-07-22 -- signals were reading today's still-forming bar, not a completed one: the
+/history API returns TODAY's daily candle live and updating throughout the session (confirmed
+directly against RELIANCE mid-session, 2026-07-22). bull_cross/bear_cross, the RRG regime, ATR,
+and the trailing-stop's highest_high tracking were all being evaluated on it, not a real
+full-session candle -- this didn't match the backtest (which signals off a genuinely completed
+bar) despite this docstring previously claiming it did. The fix is DATE-AWARE, not positional
+(the first attempt used iloc[-2], revised the same day when the schedule moved 09:20 -> 09:15
+sharp: at exactly market open today's bar may not exist AT ALL yet, and a positional -2 would
+then silently skip back a day too far). compute_indicators() now drops any bar dated today from
+BOTH the stock and index frames before computing anything, so every downstream iloc[-1] read is
+always the last genuinely completed bar regardless of whether the forming bar was present, and
+the RS-Ratio stock/index alignment can never mix a forming bar with a completed one. Entry price
+still uses live LTP, unaffected.
 
 Exit: initial stop = entry - 3.25xATR(14, daily), then a CHANDELIER-STYLE TRAILING STOP
 (6.0xATR(14, daily), ATR recomputed daily, ratchets up only) instead of a fixed target, or an
@@ -324,8 +339,21 @@ def compute_rs_ratio_momentum(stock_close, index_close):
 
 def compute_indicators(symbol, index_data_cache):
     """Daily OHLC + EMA9/20 cross + ATR14 + JdK RRG BULL regime. Returns None
-    if there's not enough history for a valid reading yet."""
+    if there's not enough history for a valid reading yet.
+
+    COMPLETED BARS ONLY (fixed 2026-07-22, made date-aware same day after the
+    schedule moved 09:20 -> 09:15): the /history API returns TODAY's daily
+    candle live and updating mid-session -- and at a 09:15 sharp run it may
+    not exist at all yet, so a positional iloc[-2] can silently skip back a
+    day too far when it's absent. Instead, today's bar (if present) is
+    DROPPED from both the stock and index frames here, before anything is
+    computed -- so iloc[-1] downstream is always the last genuinely
+    completed bar, and the RS-Ratio stock/index alignment can never pair a
+    forming stock bar with a completed index bar (or vice versa)."""
+    today_ts = pd.Timestamp(date.today())
     df = get_candles_daily(symbol)
+    if not df.empty:
+        df = df[df.index < today_ts]
     if df.empty or len(df) < ENTRY_SLOW + RS_ZSCORE_WINDOW * 2 + 5:
         return None
 
@@ -334,6 +362,9 @@ def compute_indicators(symbol, index_data_cache):
         return None
     idx_df = index_data_cache.get(idx_symbol)
     if idx_df is None or idx_df.empty:
+        return None
+    idx_df = idx_df[idx_df.index < today_ts]
+    if idx_df.empty:
         return None
 
     combined_close = pd.DataFrame({"stock": df["close"], "index": idx_df["close"]}).dropna()
@@ -409,20 +440,39 @@ def main():
             # -- Existing positions: reverse-cross exit, else trailing-stop update --
             for sym, pos in list(positions.items()):
                 ind = indicators.get(sym)
-                if ind is None:
+                if ind is None or ind.empty:
                     continue
+                # compute_indicators() drops today's (forming or absent) bar at
+                # source (2026-07-22), so iloc[-1] here is always the last
+                # genuinely COMPLETED daily bar -- matching the backtest's
+                # completed-bar-then-next-open convention.
                 last = ind.iloc[-1]
-                if bool(last["bear_cross"]):
+                if bool(last["bear_cross"]) or pos.get("pending_reverse_exit"):
                     try:
-                        ltp_map = get_multiquotes([sym])
-                        exit_px = ltp_map.get(sym, pos["entry_price"])
-                        place_order(sym, "SELL", pos["qty"])
+                        exit_px = get_multiquotes([sym]).get(sym)
+                        if exit_px is None:
+                            # Never exit blind and log a fabricated break-even
+                            # fill at entry_price (fixed 2026-07-22). Postpone
+                            # -- but bear_cross is a single-BAR event, so a
+                            # plain retry-tomorrow would silently lose the exit
+                            # once the cross bar scrolls past. Persist a
+                            # pending_reverse_exit flag instead: the every-poll
+                            # loop below retries it as soon as a price is
+                            # available, and this daily pass honors it too.
+                            pos["pending_reverse_exit"] = True
+                            log.warning(f"{sym}: REVERSE_CROSS triggered but no live price — "
+                                        f"pending flag set, will retry every poll (trailing stop still active)")
+                            continue
+                        if not pos.get("exit_order_placed"):
+                            place_order(sym, "SELL", pos["qty"])
+                            pos["exit_order_placed"] = True  # a retry must never re-send the order
                         pnl = (exit_px - pos["entry_price"]) * pos["qty"]
                         log.info(f"EXIT REVERSE_CROSS {sym} entry={pos['entry_price']:.2f} exit={exit_px:.2f} pnl={pnl:+.0f}")
                         log_closed_trade(sym, pos, exit_px, pnl, "REVERSE_CROSS", now)
                         del positions[sym]
                     except Exception as e:
-                        log.error(f"Reverse-cross exit failed for {sym}: {e}")
+                        pos["pending_reverse_exit"] = True
+                        log.error(f"Reverse-cross exit failed for {sym} (pending flag set, will retry): {e}")
                     continue
 
                 atr = float(last["atr"])
@@ -441,7 +491,7 @@ def main():
                 ind = indicators.get(sym)
                 if ind is None or ind.empty:
                     continue
-                last = ind.iloc[-1]
+                last = ind.iloc[-1]  # last COMPLETED bar (today dropped at source -- see note above)
                 if not (bool(last["bull_cross"]) and last["regime"] == "BULL"):
                     continue
 
@@ -492,6 +542,23 @@ def main():
         for sym, pos in list(positions.items()):
             ltp = ltp_map.get(sym)
             if ltp is None:
+                continue
+            if pos.get("pending_reverse_exit"):
+                # A REVERSE_CROSS exit was triggered in a daily pass but had no
+                # live price at the time (or the order path failed) -- retry as
+                # soon as a price is available rather than waiting for the next
+                # daily pass, since bear_cross is a single-bar event that won't
+                # re-fire (added 2026-07-22 with the fabricated-fill fix).
+                try:
+                    if not pos.get("exit_order_placed"):
+                        place_order(sym, "SELL", pos["qty"])
+                        pos["exit_order_placed"] = True
+                    pnl = (ltp - pos["entry_price"]) * pos["qty"]
+                    log.info(f"EXIT REVERSE_CROSS (retried) {sym} entry={pos['entry_price']:.2f} exit={ltp:.2f} pnl={pnl:+.0f}")
+                    log_closed_trade(sym, pos, ltp, pnl, "REVERSE_CROSS", now)
+                    del positions[sym]
+                except Exception as e:
+                    log.error(f"Pending reverse-cross retry failed for {sym}: {e}")
                 continue
             if ltp <= pos["trail_stop"]:
                 try:

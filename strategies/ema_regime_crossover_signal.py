@@ -230,6 +230,15 @@ def get_candles(symbol, lookback_days=CANDLE_LOOKBACK_DAYS):
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
         df = df.set_index("datetime").sort_index()
         df.columns = [c.lower() for c in df.columns]
+        # COMPLETED BARS ONLY (fixed 2026-07-22): the API returns the
+        # currently FORMING 15m bar too, so crossover/regime logic reading
+        # the last row was evaluating a candle mid-formation -- a crossover
+        # could appear and vanish before the bar closed ("repainting"),
+        # which the backtest (completed bars only) never saw. Dropping the
+        # forming bar also keeps the 30m resample causal: no bucket is ever
+        # built from partial 15m data.
+        now_naive = datetime.now(IST).replace(tzinfo=None)
+        df = df[df.index + pd.Timedelta(minutes=15) <= now_naive]
         return df
     except Exception as e:
         log.warning(f"{symbol}: history fetch error: {e}")
@@ -406,11 +415,30 @@ def main():
                 try:
                     exit_action = "SELL" if pos["direction"] == "LONG" else "BUY"
                     place_order(sym, exit_action, pos["qty"])
-                    ltp = ltp_map.get(sym, pos["entry_price"])
-                    pnl = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
-                    state["daily_realized_pnl"] += pnl
-                    log.info(f"EXIT HARD {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit~={ltp:.2f} pnl~={pnl:+.0f}")
-                    log_closed_trade(sym, pos, ltp, pnl, "HARD_EXIT", now)
+                    ltp = ltp_map.get(sym)
+                    if ltp is None:
+                        # One post-order retry before falling back -- never
+                        # silently log a fabricated break-even fill (fixed
+                        # 2026-07-22; the old fallback used entry_price,
+                        # writing a fake Rs 0 P&L row into the PF/WR/Sharpe
+                        # evidence trail whenever the quote fetch failed).
+                        try:
+                            ltp = get_multiquotes([sym]).get(sym)
+                        except Exception:
+                            ltp = None
+                    if ltp is None:
+                        # Order IS placed (mandatory square-off) but we have no
+                        # price. Log the row explicitly marked unverified so the
+                        # evidence trail can exclude it, and keep it out of the
+                        # circuit-breaker's realized-P&L tally.
+                        log.error(f"HARD EXIT {sym}: order placed but NO price available — "
+                                  f"logging P&L as unverified (reason HARD_EXIT_NOPRICE)")
+                        log_closed_trade(sym, pos, pos["entry_price"], 0.0, "HARD_EXIT_NOPRICE", now)
+                    else:
+                        pnl = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
+                        state["daily_realized_pnl"] += pnl
+                        log.info(f"EXIT HARD {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit~={ltp:.2f} pnl~={pnl:+.0f}")
+                        log_closed_trade(sym, pos, ltp, pnl, "HARD_EXIT", now)
                     del positions[sym]
                 except Exception as e:
                     log.error(f"Hard-exit failed for {sym}: {e}")
@@ -467,10 +495,19 @@ def main():
                     log.info(f"HOLD {pos['direction']} {sym} entry={pos['entry_price']:.2f} ltp={ltp:.2f} pnl~={pnl_now:+.0f}")
                 continue
 
+            if ltp is None:
+                # Only REVERSE_CROSS can trigger without a live price (it's
+                # bar-based; STOP/TARGET require ltp). Postpone to the next
+                # 5-min poll instead of exiting blind and logging a fabricated
+                # break-even fill at entry_price (fixed 2026-07-22) -- the
+                # position keeps its stop/target protection meanwhile.
+                log.warning(f"{sym}: {reason} triggered but no live price — postponing exit to next poll")
+                continue
+
             try:
                 exit_action = "SELL" if pos["direction"] == "LONG" else "BUY"
                 place_order(sym, exit_action, pos["qty"])
-                exit_px = ltp if ltp is not None else pos["entry_price"]
+                exit_px = ltp
                 pnl = (exit_px - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
                 state["daily_realized_pnl"] += pnl
                 log.info(f"EXIT {reason} {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit={exit_px:.2f} pnl={pnl:+.0f}")
@@ -514,10 +551,25 @@ def main():
         if direction is None:
             continue
 
-        entry_price = float(last["close"])
         atr = float(last["atr"])
         if atr <= 0 or np.isnan(atr):
             continue
+
+        # Live LTP for the entry reference, not the signal bar's close (fixed
+        # 2026-07-22): stop/target levels and P&L all key off entry_price, so
+        # it must be the price we actually entered near, not a bar close from
+        # up to 15 minutes earlier that was never traded against. Same pattern
+        # the swing sibling already uses. Skip this tick if no price is
+        # available -- signal can re-fire next poll.
+        try:
+            entry_ltp = get_multiquotes([sym]).get(sym)
+        except Exception as e:
+            log.warning(f"{sym}: entry LTP fetch failed — skipping this tick: {e}")
+            continue
+        if entry_ltp is None:
+            continue
+        entry_price = float(entry_ltp)
+
         qty = int(buying_power // entry_price)
         if qty <= 0:
             continue

@@ -32,13 +32,20 @@ naked-long PF 1.14 and a 100pt/35%-cost spread's PF 0.30. Real cost is
 whatever the market actually charges at entry, not an assumption — this
 script tracks it directly from live leg prices.
 
-Execution: entry uses /api/v1/optionsmultiorder (offset-based ATM/OTM1
-resolution against CURRENT spot — correct for opening a new position).
-Exit deliberately does NOT reuse optionsmultiorder's offset resolution —
-by the time we exit, spot has moved (that's why we're exiting), so
-re-resolving "ATM" then could target a different strike than what we
-actually hold. Exit closes the exact stored entry symbols via two plain
-/api/v1/placeorder calls instead.
+Execution (reworked 2026-07-22): BOTH entry and exit place two plain
+/api/v1/placeorder calls against exact, pre-resolved symbols. Entry
+trades the same symbols that were resolved and quoted during sizing
+(estimate_spread_capital_requirement) — previously entry re-resolved
+ATM/OTM1 offsets via /api/v1/optionsmultiorder moments after sizing,
+and spot ticking across a strike boundary in between could open a
+different strike than the one sized. Leg ordering is live-safe: entry
+buys the long leg before selling the short (hedge exists first); exit
+buys the short back before selling the long (never leaves the short
+momentarily naked). Exit records per-leg completion in state so a
+partial failure retried next tick never re-sends an already-closed leg.
+Exit still deliberately never re-resolves offsets — by exit time spot
+has moved (that's why we're exiting), so "ATM" could map to a different
+strike than what we actually hold.
 
 State persisted to state/orb_spread_state.json (intraday)
 """
@@ -80,11 +87,12 @@ RANGE_CHK     = dtime(10, 15)
 IST           = pytz.timezone("Asia/Kolkata")
 STATE_FILE    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "orb_spread_state.json")
 
-# Debit-spread payoff model for trade-log P&L estimation (mirrors the adopted
-# backtest config -- orb_spread.md "Debit Spread Structure", 50pt/15%-cost).
-# Real entry mechanics already trade the actual 50pt-interval OTM1 spread via
-# broker offset resolution; this is only used to estimate rupee P&L for the
-# trade log / ongoing Sharpe-PF-WR tracking (2026-07-18), not the exit decision.
+# Debit-spread payoff model constants (mirrors the adopted backtest config --
+# orb_spread.md "Debit Spread Structure", 50pt/15%-cost). REFERENCE ONLY as of
+# 2026-07-22: no longer used in any live calculation. P&L logging uses real
+# fills (2026-07-21 fix), and sizing uses the real /api/v1/margin basket quote
+# floored at the real net debit (2026-07-22 fix). Kept to document the model
+# the backtest evidence rests on.
 SPREAD_WIDTH  = 50
 SPREAD_COST   = SPREAD_WIDTH * 0.15  # 7.5 pts
 
@@ -134,6 +142,16 @@ def get_candles(interval="5m"):
     df = pd.DataFrame(data["data"])
     df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     df = df.set_index("datetime").sort_index()
+    # COMPLETED BARS ONLY (fixed 2026-07-22): the API returns the currently
+    # FORMING bar too, so signal logic reading the last row was evaluating a
+    # candle mid-formation -- a rejection/confirmation pattern could appear
+    # and then vanish before the bar closed ("repainting"), which the
+    # backtest (completed bars only) never saw. Drop any bar whose window
+    # hasn't fully elapsed yet.
+    bar_minutes = int(interval.rstrip("m")) if interval.endswith("m") else None
+    if bar_minutes:
+        now_naive = datetime.now(IST).replace(tzinfo=None)
+        df = df[df.index + pd.Timedelta(minutes=bar_minutes) <= now_naive]
     return df
 
 def get_prev_day_move_pct():
@@ -194,46 +212,78 @@ def resolve_option_symbol(option_type, offset, expiry):
         raise RuntimeError(data)
     return data["symbol"]
 
-def estimate_net_debit(option_type):
-    """Resolve the ATM/OTM1 leg symbols and fetch their live quotes WITHOUT
-    placing an order, so compute_lot_quantity can size against the REAL
-    premium about to be paid, not a fixed assumption."""
+def estimate_spread_capital_requirement(option_type):
+    """Resolve the ATM/OTM1 leg symbols, then fetch BOTH the live net debit
+    (for entry_net_debit tracking/logging) and the REAL basket margin for 1
+    lot via /api/v1/margin -- same pattern already used by the swing
+    sibling's get_mtf_leverage(). No order is placed by this call.
+
+    Fixed 2026-07-22: compute_lot_quantity() used to size purely against
+    net_debit (the spread's defined max loss), on the assumption the broker
+    nets the two legs into one defined-risk position. It doesn't -- Sandbox
+    (and per Karan's understanding, real Dhan margin) blocks EACH LEG'S
+    NOTIONAL INDEPENDENTLY, not netted. At the settings live 2026-07-22 that
+    produced ~192 lots/12,480 shares per leg -- the real margin for a
+    position that size is roughly 4x the Rs 2,00,000 per-leg pool, the same
+    class of bug as the 2026-07-21 sizing bug (see scorecard.md), just
+    re-surfaced by a different constraint the previous fix didn't check.
+    Also returns the resolved leg symbols so the ORDER trades the exact
+    contracts that were sized (fixed 2026-07-22 -- entry previously
+    re-resolved ATM/OTM1 offsets via /optionsmultiorder moments after
+    sizing; spot ticking across a strike boundary in between could open a
+    different strike than the one sized/quoted).
+
+    Returns (net_debit_per_share, margin_per_lot, long_sym, short_sym)."""
     expiry = get_current_expiry()
     long_sym = resolve_option_symbol(option_type, "ATM", expiry)
     short_sym = resolve_option_symbol(option_type, SHORT_OFFSET, expiry)
     quotes = get_multiquotes([(long_sym, "NFO"), (short_sym, "NFO")])
-    return quotes[long_sym] - quotes[short_sym]
+    net_debit = quotes[long_sym] - quotes[short_sym]
 
-def compute_lot_quantity(net_debit_per_share):
-    """Capital-based sizing (2026-07-18, redesigned 2026-07-21 three times,
-    Karan-confirmed): bull and bear each get their own FIXED, INDEPENDENT
-    capital pool -- (allocated_capital x DEPLOYMENT_CAP_PCT) / 2 -- rather
-    than sharing one combined pool. A shared-pool design was tried first the
-    same day and replaced: whichever signal fired first could claim most/all
-    of the shared amount, starving or zeroing the second same-day entry.
-    Fixing each leg's own pool removes that order-of-arrival risk, at the
-    cost of some capital efficiency on solo-signal days (a lone entry is now
-    capped at half the deployment ceiling, not the full amount -- accepted
-    tradeoff). The per-leg cap is a fraction of allocated_capital, not a
-    frozen rupee figure, so it scales up automatically as profit compounds
-    in live mode, same as everything else in this script.
+    r = requests.post(f"{HOST}/api/v1/margin",
+                      json={"apikey": API_KEY, "positions": [
+                          {"exchange": "NFO", "symbol": long_sym, "action": "BUY",
+                           "quantity": str(LOT_SIZE), "product": "MIS", "pricetype": "MARKET"},
+                          {"exchange": "NFO", "symbol": short_sym, "action": "SELL",
+                           "quantity": str(LOT_SIZE), "product": "MIS", "pricetype": "MARKET"},
+                      ]}, headers=_headers(), timeout=15)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "success":
+        raise RuntimeError(f"Margin API error: {data}")
+    margin_per_lot = float(data["data"]["total_margin_required"])
+    return net_debit, margin_per_lot, long_sym, short_sym
 
-    Sizes against the REAL live net debit quoted for this entry (see
-    estimate_net_debit), not the backtest's modeled SPREAD_COST=7.5pt
-    assumption -- that assumption silently sized a 35-lot/2275-share order
-    on 2026-07-21 when this function used it directly instead of a real
-    quote. risk_per_share is still floored at SPREAD_COST so an
-    unrealistically cheap quote can't size UP past what the model expects.
+def compute_lot_quantity(net_debit_per_share, margin_per_lot):
+    """Capital-based sizing (2026-07-18, redesigned 2026-07-21 three times +
+    2026-07-22 margin fix, Karan-confirmed): bull and bear each get their own
+    FIXED, INDEPENDENT capital pool -- (allocated_capital x
+    DEPLOYMENT_CAP_PCT) / 2 -- rather than sharing one combined pool. A
+    shared-pool design was tried first and replaced same day (2026-07-21):
+    whichever signal fired first could claim most/all of the shared amount,
+    starving or zeroing the second same-day entry. Fixing each leg's own
+    pool removes that order-of-arrival risk, at the cost of some capital
+    efficiency on solo-signal days (a lone entry is now capped at half the
+    deployment ceiling, not the full amount -- accepted tradeoff). The
+    per-leg cap is a fraction of allocated_capital, not a frozen rupee
+    figure, so it scales up automatically as profit compounds in live mode.
+
+    Sizes against the REAL basket margin for 1 lot (see
+    estimate_spread_capital_requirement), not net_debit -- see that
+    function's docstring for why net_debit alone undersizes the real
+    capital cost. Floored at net_debit x LOT_SIZE (the defined-risk floor
+    the backtest itself assumes) so a margin-API hiccup returning something
+    too small can't size UP past what the model expects either.
 
     Can return 0 if even 1 lot doesn't fit the per-leg cap at the real
-    quoted premium -- the caller must skip the trade rather than force a
+    margin/premium -- the caller must skip the trade rather than force a
     minimum entry. No separate MAX_LOTS backstop -- removed 2026-07-21
     (Karan-confirmed) since it would silently override the capital-based
     settings; the per-leg capital math above is the sole sizing limit."""
     allocated_capital = get_allocated_capital("orb_spread")
     per_leg_cap = (allocated_capital * DEPLOYMENT_CAP_PCT) / 2
-    risk_per_share = max(net_debit_per_share, SPREAD_COST)
-    lots = int(per_leg_cap // (risk_per_share * LOT_SIZE))
+    capital_per_lot = max(margin_per_lot, net_debit_per_share * LOT_SIZE)
+    lots = int(per_leg_cap // capital_per_lot)
     return lots * LOT_SIZE
 
 def place_order(symbol, action, quantity):
@@ -245,43 +295,66 @@ def place_order(symbol, action, quantity):
     r.raise_for_status()
     return r.json()
 
-def open_spread(option_type, quantity):
-    """BUY ATM + SELL OTM1 (50pt-wide debit spread), resolved against
-    CURRENT spot -- correct for opening a fresh position.
-    Returns (long_symbol, short_symbol, long_ltp, short_ltp)."""
-    expiry = get_current_expiry()
-    r = requests.post(f"{HOST}/api/v1/optionsmultiorder",
-                      json={"apikey": API_KEY, "strategy": "orb_spread", "underlying": "NIFTY",
-                            "exchange": "NSE_INDEX", "expiry_date": expiry,
-                            "legs": [
-                                {"offset": "ATM", "option_type": option_type, "action": "BUY", "quantity": quantity},
-                                {"offset": SHORT_OFFSET, "option_type": option_type, "action": "SELL", "quantity": quantity},
-                            ]},
-                      headers=_headers(), timeout=20)
-    r.raise_for_status()
-    data = r.json()
-    if data.get("status") != "success":
-        raise RuntimeError(data)
-    results = sorted(data["results"], key=lambda x: x["leg"])
-    long_sym, short_sym = results[0]["symbol"], results[1]["symbol"]
-    quotes = get_multiquotes([(long_sym, "NFO"), (short_sym, "NFO")])
-    return long_sym, short_sym, quotes[long_sym], quotes[short_sym]
+def open_spread_legs(long_symbol, short_symbol, quantity):
+    """Open the debit spread on the EXACT symbols already resolved and sized
+    (estimate_spread_capital_requirement) -- replaces the old
+    /optionsmultiorder offset-based entry, which re-resolved ATM/OTM1
+    moments after sizing and could open a different strike than the one
+    sized if spot ticked across a strike boundary in between (fixed
+    2026-07-22).
 
-def close_spread(long_symbol, short_symbol, quantity):
-    """Close both legs using their EXACT entry symbols -- NOT re-resolved
-    offsets, since spot has moved since entry (that's why we're exiting)
-    and re-resolving ATM/OTM1 now could target a different strike. Quantity
-    must match what was actually entered (position sizing is no longer a
-    fixed constant -- see compute_lot_quantity).
+    Leg order matters live: BUY the long leg FIRST, then SELL the short --
+    the hedge exists before the short is opened, so a real broker never
+    sees a naked short (margin spike / outright rejection risk). If the
+    short leg fails after the long filled, retry once, then close the long
+    (compensating SELL) and abort the entry -- never leave a silent naked
+    long that no exit logic knows the true shape of.
 
-    Returns (long_exit_ltp, short_exit_ltp) -- fetched via a post-order
-    quote, same pattern open_spread() already uses for entry fills -- so
-    the caller can log REAL fill-based P&L (see log_closed_trade(), fixed
-    2026-07-21) instead of a modeled estimate."""
-    place_order(long_symbol, "SELL", quantity)
-    place_order(short_symbol, "BUY", quantity)
+    Returns (long_ltp, short_ltp) -- post-order quotes, the entry-fill
+    proxies used for entry_net_debit tracking."""
+    place_order(long_symbol, "BUY", quantity)
+    try:
+        place_order(short_symbol, "SELL", quantity)
+    except Exception as first_err:
+        log.warning(f"Short leg SELL failed after long leg filled ({first_err}) — retrying once")
+        try:
+            place_order(short_symbol, "SELL", quantity)
+        except Exception:
+            log.error("Short leg SELL failed twice — closing the long leg to avoid a naked position")
+            try:
+                place_order(long_symbol, "SELL", quantity)
+                log.error("Compensating close of the long leg succeeded — entry fully aborted")
+            except Exception:
+                log.critical(f"COMPENSATING CLOSE FAILED — naked long {long_symbol} x{quantity} "
+                             f"may be live; MANUAL INTERVENTION NEEDED")
+            raise
     quotes = get_multiquotes([(long_symbol, "NFO"), (short_symbol, "NFO")])
     return quotes[long_symbol], quotes[short_symbol]
+
+def close_spread(pos):
+    """Close both legs using their EXACT entry symbols -- NOT re-resolved
+    offsets, since spot has moved since entry (that's why we're exiting)
+    and re-resolving ATM/OTM1 now could target a different strike.
+
+    Leg order flipped 2026-07-22: BUY back the short leg FIRST, then SELL
+    the long -- closing the long first leaves the short momentarily naked,
+    which a real broker can margin-reject mid-exit. Per-leg completion is
+    recorded on the position dict (persisted via state) so a partial
+    failure retried next tick does NOT re-send a leg that already closed --
+    re-sending would flip or double the position instead of closing it.
+
+    Returns (long_exit_ltp, short_exit_ltp) -- post-order quotes, so the
+    caller can log REAL fill-based P&L (see log_closed_trade(), fixed
+    2026-07-21) instead of a modeled estimate."""
+    qty = pos["quantity"]
+    if not pos.get("short_leg_closed"):
+        place_order(pos["short_symbol"], "BUY", qty)
+        pos["short_leg_closed"] = True
+    if not pos.get("long_leg_closed"):
+        place_order(pos["long_symbol"], "SELL", qty)
+        pos["long_leg_closed"] = True
+    quotes = get_multiquotes([(pos["long_symbol"], "NFO"), (pos["short_symbol"], "NFO")])
+    return quotes[pos["long_symbol"]], quotes[pos["short_symbol"]]
 
 
 def log_closed_trade(direction, reason, pos, spot, pnl_pts, exit_net_debit, now):
@@ -361,16 +434,20 @@ def main():
     orb_low  = state["orb_low"]
 
     # ── Range day check at 10:15 ──────────────────────────────────────────────
+    # No early return on detection (fixed 2026-07-22): this used to `return`
+    # immediately, skipping the exit-management block below for one full tick
+    # — a position opened between 09:45 and 10:15 went unmanaged on exactly
+    # the tick that flagged the range day. The flag only needs to gate NEW
+    # entries, and the "Range day — no new entries" gate below already does
+    # that; exits must run every tick unconditionally.
     if t >= RANGE_CHK and not state.get("range_checked"):
         try:
             spot = get_nifty_spot()
             if orb_low < spot < orb_high:
                 log.info(f"Range day detected at 10:15 (spot {spot:.2f} inside OR) — no more entries")
-                state["range_day"]    = True
-                state["range_checked"] = True
-                save_state(state)
-                return
+                state["range_day"] = True
             state["range_checked"] = True
+            save_state(state)
         except Exception as e:
             log.warning(f"Range day check failed: {e}")
 
@@ -385,21 +462,21 @@ def main():
             pnl_pts    = (entry_spot - spot) * sign  # bear profits on spot falling, bull on spot rising
 
             if pnl_pts >= TARGET_PTS:
-                long_exit_ltp, short_exit_ltp = close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
+                long_exit_ltp, short_exit_ltp = close_spread(pos)
                 exit_net_debit = long_exit_ltp - short_exit_ltp
                 log.info(f"EXIT TARGET {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} (+{pnl_pts:.1f}pts) "
                          f"exit_net_debit={exit_net_debit:.2f} (entry {pos['entry_net_debit']:.2f})")
                 log_closed_trade(direction, "TARGET", pos, spot, pnl_pts, exit_net_debit, now)
                 state[f"{direction}_position"] = None
             elif pnl_pts <= -STOP_PTS:
-                long_exit_ltp, short_exit_ltp = close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
+                long_exit_ltp, short_exit_ltp = close_spread(pos)
                 exit_net_debit = long_exit_ltp - short_exit_ltp
                 log.info(f"EXIT STOP {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts) "
                          f"exit_net_debit={exit_net_debit:.2f} (entry {pos['entry_net_debit']:.2f})")
                 log_closed_trade(direction, "STOP", pos, spot, pnl_pts, exit_net_debit, now)
                 state[f"{direction}_position"] = None
             elif t >= HARD_EXIT:
-                long_exit_ltp, short_exit_ltp = close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
+                long_exit_ltp, short_exit_ltp = close_spread(pos)
                 exit_net_debit = long_exit_ltp - short_exit_ltp
                 log.info(f"EXIT HARD {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts) "
                          f"exit_net_debit={exit_net_debit:.2f} (entry {pos['entry_net_debit']:.2f})")
@@ -460,17 +537,31 @@ def main():
         # ── Enter Bear Put Spread ─────────────────────────────────────────────
         if bear_signal and not state["bear_traded"] and not state["bear_position"]:
             try:
-                net_debit_est = estimate_net_debit("PE")
-                quantity = compute_lot_quantity(net_debit_est)
+                net_debit_est, margin_per_lot, long_sym, short_sym = estimate_spread_capital_requirement("PE")
+                quantity = compute_lot_quantity(net_debit_est, margin_per_lot)
                 if quantity <= 0:
                     log.info(f"BEAR signal {bear_signal} skipped — even 1 lot doesn't fit "
-                             f"the per-leg capital pool at est net_debit {net_debit_est:.2f}. "
+                             f"the per-leg capital pool (1-lot margin Rs {margin_per_lot:,.0f}, "
+                             f"est net_debit {net_debit_est:.2f}). "
                              f"Not marking bear_traded -- will retry next tick.")
                 else:
-                    long_sym, short_sym, long_ltp, short_ltp = open_spread("PE", quantity)
+                    # Live spot at entry, not the signal bar's close (fixed
+                    # 2026-07-22): the ±TARGET/STOP exit triggers measure spot
+                    # movement from entry_spot, so it must be the spot at the
+                    # moment we actually entered, not a bar close from up to 5
+                    # minutes earlier that was never traded against.
+                    try:
+                        entry_spot = get_nifty_spot()
+                    except Exception:
+                        entry_spot = spot  # fall back to signal bar close, logged below
+                        log.warning("Live spot fetch failed at bear entry — using signal bar close as entry_spot")
+                    long_ltp, short_ltp = open_spread_legs(long_sym, short_sym, quantity)
                     net_debit = long_ltp - short_ltp
                     log.info(f"ENTRY BEAR PUT SPREAD {bear_signal} | +{long_sym} -{short_sym} | "
-                             f"spot={spot:.2f} | net_debit={net_debit:.2f} (sized against est {net_debit_est:.2f}) | qty={quantity}")
+                             f"entry_spot={entry_spot:.2f} (signal bar close {spot:.2f}) | "
+                             f"net_debit={net_debit:.2f} (sized against est {net_debit_est:.2f}, "
+                             f"1-lot margin Rs {margin_per_lot:,.0f}) | qty={quantity} "
+                             f"(~Rs {margin_per_lot * quantity / LOT_SIZE:,.0f} margin)")
                     if net_debit > net_debit_est * 1.5:
                         log.warning(f"Real fill net_debit {net_debit:.2f} is well above the {net_debit_est:.2f}pt "
                                     f"estimate used for sizing -- price moved between the sizing quote and the "
@@ -479,7 +570,7 @@ def main():
                     state["bear_traded"]   = True
                     state["bear_position"] = {
                         "long_symbol": long_sym, "short_symbol": short_sym,
-                        "entry_spot": spot, "entry_net_debit": net_debit,
+                        "entry_spot": entry_spot, "entry_net_debit": net_debit,
                         "entry_time": now.isoformat(), "signal": bear_signal,
                         "quantity": quantity,
                     }
@@ -489,17 +580,28 @@ def main():
         # ── Enter Bull Call Spread ─────────────────────────────────────────────
         if bull_signal and not state["bull_traded"] and not state["bull_position"]:
             try:
-                net_debit_est = estimate_net_debit("CE")
-                quantity = compute_lot_quantity(net_debit_est)
+                net_debit_est, margin_per_lot, long_sym, short_sym = estimate_spread_capital_requirement("CE")
+                quantity = compute_lot_quantity(net_debit_est, margin_per_lot)
                 if quantity <= 0:
                     log.info(f"BULL signal {bull_signal} skipped — even 1 lot doesn't fit "
-                             f"the per-leg capital pool at est net_debit {net_debit_est:.2f}. "
+                             f"the per-leg capital pool (1-lot margin Rs {margin_per_lot:,.0f}, "
+                             f"est net_debit {net_debit_est:.2f}). "
                              f"Not marking bull_traded -- will retry next tick.")
                 else:
-                    long_sym, short_sym, long_ltp, short_ltp = open_spread("CE", quantity)
+                    # Live spot at entry, not the signal bar's close — see the
+                    # matching note at the bear entry above (fixed 2026-07-22).
+                    try:
+                        entry_spot = get_nifty_spot()
+                    except Exception:
+                        entry_spot = spot
+                        log.warning("Live spot fetch failed at bull entry — using signal bar close as entry_spot")
+                    long_ltp, short_ltp = open_spread_legs(long_sym, short_sym, quantity)
                     net_debit = long_ltp - short_ltp
                     log.info(f"ENTRY BULL CALL SPREAD {bull_signal} | +{long_sym} -{short_sym} | "
-                             f"spot={spot:.2f} | net_debit={net_debit:.2f} (sized against est {net_debit_est:.2f}) | qty={quantity}")
+                             f"entry_spot={entry_spot:.2f} (signal bar close {spot:.2f}) | "
+                             f"net_debit={net_debit:.2f} (sized against est {net_debit_est:.2f}, "
+                             f"1-lot margin Rs {margin_per_lot:,.0f}) | qty={quantity} "
+                             f"(~Rs {margin_per_lot * quantity / LOT_SIZE:,.0f} margin)")
                     if net_debit > net_debit_est * 1.5:
                         log.warning(f"Real fill net_debit {net_debit:.2f} is well above the {net_debit_est:.2f}pt "
                                     f"estimate used for sizing -- price moved between the sizing quote and the "
@@ -508,7 +610,7 @@ def main():
                     state["bull_traded"]   = True
                     state["bull_position"] = {
                         "long_symbol": long_sym, "short_symbol": short_sym,
-                        "entry_spot": spot, "entry_net_debit": net_debit,
+                        "entry_spot": entry_spot, "entry_net_debit": net_debit,
                         "entry_time": now.isoformat(), "signal": bull_signal,
                         "quantity": quantity,
                     }
