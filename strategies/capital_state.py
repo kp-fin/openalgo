@@ -27,7 +27,7 @@ os.makedirs(LOGS_DIR, exist_ok=True)
 TRADE_LOG_COLUMNS = {
     "orb_spread": [
         "date", "entry_time", "direction", "signal", "entry_spot", "exit_time",
-        "exit_spot", "pnl_pts", "spread_pnl_pts", "pnl_rupees", "reason", "mode",
+        "exit_spot", "pnl_pts", "exit_net_debit", "pnl_rupees", "reason", "mode",
     ],
     "ema_regime_crossover": [
         "date", "symbol", "direction", "entry_time", "entry_price",

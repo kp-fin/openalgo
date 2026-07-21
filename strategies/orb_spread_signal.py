@@ -272,19 +272,33 @@ def close_spread(long_symbol, short_symbol, quantity):
     offsets, since spot has moved since entry (that's why we're exiting)
     and re-resolving ATM/OTM1 now could target a different strike. Quantity
     must match what was actually entered (position sizing is no longer a
-    fixed constant -- see compute_lot_quantity)."""
+    fixed constant -- see compute_lot_quantity).
+
+    Returns (long_exit_ltp, short_exit_ltp) -- fetched via a post-order
+    quote, same pattern open_spread() already uses for entry fills -- so
+    the caller can log REAL fill-based P&L (see log_closed_trade(), fixed
+    2026-07-21) instead of a modeled estimate."""
     place_order(long_symbol, "SELL", quantity)
     place_order(short_symbol, "BUY", quantity)
+    quotes = get_multiquotes([(long_symbol, "NFO"), (short_symbol, "NFO")])
+    return quotes[long_symbol], quotes[short_symbol]
 
 
-def log_closed_trade(direction, reason, pos, spot, pnl_pts, now):
-    """Estimate rupee P&L via the adopted spread payoff model and append to
-    the trade log (paper AND live) for ongoing Sharpe/PF/win-rate/avg-P&L
-    tracking (2026-07-18). Live mode also compounds pnl_rupees into
+def log_closed_trade(direction, reason, pos, spot, pnl_pts, exit_net_debit, now):
+    """Real fill-based P&L (fixed 2026-07-21, replaces a modeled estimate).
+    A debit spread's value = long_leg_premium - short_leg_premium: you PAY
+    entry_net_debit to open (buy long, sell short) and RECEIVE exit_net_debit
+    to close (sell long, buy short) -- P&L per share is exactly that
+    difference, no modeling assumption needed. Old formula (spread_pnl_pts =
+    spot points moved, capped at SPREAD_WIDTH, minus a flat SPREAD_COST
+    assumption) could diverge substantially from real fills -- on 2026-07-21
+    it logged +Rs 81,558.75/-Rs 17,062.50 for two trades whose real fills
+    were +Rs 21,385.00/-Rs 14,673.75, a ~9.6x overstatement on the winner.
+    See indices-system/scorecard.md for the full writeup and the restated
+    historical CSV values. Live mode still compounds pnl_rupees into
     allocated_capital -- see capital_state.py."""
-    spread_pnl_pts = min(max(pnl_pts, 0), SPREAD_WIDTH) - SPREAD_COST
     qty = pos.get("quantity", LOT_SIZE)
-    pnl_rupees = spread_pnl_pts * qty
+    pnl_rupees = (exit_net_debit - pos["entry_net_debit"]) * qty
     record_trade("orb_spread", {
         "date": now.strftime("%Y-%m-%d"),
         "entry_time": pos["entry_time"],
@@ -294,7 +308,7 @@ def log_closed_trade(direction, reason, pos, spot, pnl_pts, now):
         "exit_time": now.isoformat(),
         "exit_spot": round(spot, 2),
         "pnl_pts": round(pnl_pts, 2),
-        "spread_pnl_pts": round(spread_pnl_pts, 2),
+        "exit_net_debit": round(exit_net_debit, 2),
         "pnl_rupees": round(pnl_rupees, 2),
         "reason": reason,
     }, pnl_rupees)
@@ -371,19 +385,25 @@ def main():
             pnl_pts    = (entry_spot - spot) * sign  # bear profits on spot falling, bull on spot rising
 
             if pnl_pts >= TARGET_PTS:
-                close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
-                log.info(f"EXIT TARGET {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} (+{pnl_pts:.1f}pts)")
-                log_closed_trade(direction, "TARGET", pos, spot, pnl_pts, now)
+                long_exit_ltp, short_exit_ltp = close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
+                exit_net_debit = long_exit_ltp - short_exit_ltp
+                log.info(f"EXIT TARGET {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} (+{pnl_pts:.1f}pts) "
+                         f"exit_net_debit={exit_net_debit:.2f} (entry {pos['entry_net_debit']:.2f})")
+                log_closed_trade(direction, "TARGET", pos, spot, pnl_pts, exit_net_debit, now)
                 state[f"{direction}_position"] = None
             elif pnl_pts <= -STOP_PTS:
-                close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
-                log.info(f"EXIT STOP {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts)")
-                log_closed_trade(direction, "STOP", pos, spot, pnl_pts, now)
+                long_exit_ltp, short_exit_ltp = close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
+                exit_net_debit = long_exit_ltp - short_exit_ltp
+                log.info(f"EXIT STOP {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts) "
+                         f"exit_net_debit={exit_net_debit:.2f} (entry {pos['entry_net_debit']:.2f})")
+                log_closed_trade(direction, "STOP", pos, spot, pnl_pts, exit_net_debit, now)
                 state[f"{direction}_position"] = None
             elif t >= HARD_EXIT:
-                close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
-                log.info(f"EXIT HARD {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts)")
-                log_closed_trade(direction, "HARD_EXIT", pos, spot, pnl_pts, now)
+                long_exit_ltp, short_exit_ltp = close_spread(pos["long_symbol"], pos["short_symbol"], pos["quantity"])
+                exit_net_debit = long_exit_ltp - short_exit_ltp
+                log.info(f"EXIT HARD {direction.upper()} entry_spot={entry_spot:.2f} spot={spot:.2f} ({pnl_pts:.1f}pts) "
+                         f"exit_net_debit={exit_net_debit:.2f} (entry {pos['entry_net_debit']:.2f})")
+                log_closed_trade(direction, "HARD_EXIT", pos, spot, pnl_pts, exit_net_debit, now)
                 state[f"{direction}_position"] = None
             else:
                 # Informational net-value check (not the exit decision)
