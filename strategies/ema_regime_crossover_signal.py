@@ -193,12 +193,14 @@ def load_state():
             "positions": {},
             "daily_realized_pnl": 0.0,
             "daily_loss_halted": False,
+            "daily_loss_blocked": [],   # symbols blocked from re-entry after a losing exit today
         }
     s.setdefault("positions", {})
     s.setdefault("universe", [])
     s.setdefault("universe_month", None)
     s.setdefault("daily_realized_pnl", 0.0)
     s.setdefault("daily_loss_halted", False)
+    s.setdefault("daily_loss_blocked", [])
     return s
 
 
@@ -437,6 +439,8 @@ def main():
                     else:
                         pnl = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
                         state["daily_realized_pnl"] += pnl
+                        if pnl < 0 and sym not in state["daily_loss_blocked"]:
+                            state["daily_loss_blocked"].append(sym)
                         log.info(f"EXIT HARD {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit~={ltp:.2f} pnl~={pnl:+.0f}")
                         log_closed_trade(sym, pos, ltp, pnl, "HARD_EXIT", now)
                     del positions[sym]
@@ -510,6 +514,9 @@ def main():
                 exit_px = ltp
                 pnl = (exit_px - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
                 state["daily_realized_pnl"] += pnl
+                if pnl < 0 and sym not in state["daily_loss_blocked"]:
+                    state["daily_loss_blocked"].append(sym)
+                    log.info(f"LOSS_BLOCK {sym} — no re-entry today (pnl={pnl:+.0f})")
                 log.info(f"EXIT {reason} {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit={exit_px:.2f} pnl={pnl:+.0f}")
                 log_closed_trade(sym, pos, exit_px, pnl, reason, now)
                 del positions[sym]
@@ -537,6 +544,9 @@ def main():
         if len(positions) >= MAX_CONCURRENT:
             break
         if sym in positions:
+            continue
+        if sym in state["daily_loss_blocked"]:
+            log.info(f"SKIP {sym} — blocked after intraday loss")
             continue
         ind = indicators.get(sym)
         if ind is None or ind.empty:
