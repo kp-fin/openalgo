@@ -28,6 +28,18 @@ EMA Regime Crossover: source trades are the 2026-07-17 backtest
 was run on TOTAL_CAPITAL = Rs 1 Cr (matching OpenAlgo Sandbox convention,
 12.5%-of-capital flat sizing per trade -- see ema_regime_crossover_backtest.py).
 Daily return = that day's total pnl_rupees / TOTAL_CAPITAL.
+
+EMA Regime Crossover (with circuit breaker, added 2026-07-28): the live script
+has run a daily-loss circuit breaker (2% portfolio halt + per-symbol same-day
+loss-block) since 2026-07-17/18, never modeled in the original Sharpe baseline
+above. Source trades are ema_regime_crossover_backtest_daily_circuit_breaker.py's
+output (same regime/entry/exit rules, corrected current sizing -- allocated
+capital Rs 2,50,000, NOT the Rs 1 Cr basis above -- with the breaker retrofitted).
+Daily return = that day's total pnl_rupees / Rs 2,50,000 (the actual capital that
+backtest sized against, per the 2026-07-28 sizing correction -- see
+equities-system/strategies/ema_regime_crossover.md's "Sizing Correction" section).
+This is the more accurate Sharpe estimate for the deployed strategy; the original
+figure above predates this finding and is kept for historical comparison only.
 """
 
 import os
@@ -97,18 +109,41 @@ ema_daily_pnl = ema.groupby("exit_date")["pnl_rupees"].sum()
 ema_daily_return = ema_daily_pnl / TOTAL_CAPITAL
 
 ema_sharpe = report(
-    "EMA Regime Crossover (18-name backtest, Rs 1 Cr capital base, 12.5%/trade sizing)",
+    "EMA Regime Crossover (18-name backtest, Rs 1 Cr capital base, 12.5%/trade sizing) — ORIGINAL, no circuit breaker",
     ema_daily_return,
     n_trades=len(ema),
     n_days=len(ema_daily_return),
     basis_note="daily portfolio return = day's total pnl_rupees / Rs 1,00,00,000",
 )
 
+# ---------------------------------------------------------------------------
+# EMA Regime Crossover — with daily-loss circuit breaker retrofitted (2026-07-28)
+# ---------------------------------------------------------------------------
+EMA_CB_CAPITAL = 250_000  # allocated_capital, matches the corrected sizing this backtest used
+
+ema_cb = pd.read_csv(os.path.join(
+    BASE, "ema_regime_crossover_daily_circuit_breaker", "ema_regime_crossover_daily_circuit_breaker_trades.csv"
+))
+ema_cb["exit_time"] = pd.to_datetime(ema_cb["exit_time"])
+ema_cb["exit_date"] = ema_cb["exit_time"].dt.date
+
+ema_cb_daily_pnl = ema_cb.groupby("exit_date")["pnl_rupees"].sum()
+ema_cb_daily_return = ema_cb_daily_pnl / EMA_CB_CAPITAL
+
+ema_cb_sharpe = report(
+    "EMA Regime Crossover (18-name backtest, Rs 2,50,000 capital base) — WITH daily circuit breaker",
+    ema_cb_daily_return,
+    n_trades=len(ema_cb),
+    n_days=len(ema_cb_daily_return),
+    basis_note=f"daily portfolio return = day's total pnl_rupees / Rs {EMA_CB_CAPITAL:,}",
+)
+
 print("=" * 100)
 print("SUMMARY")
 print("=" * 100)
-print(f"  ORB_Spread Sharpe:            {orb_sharpe:.2f}  (goal >= 2.00)")
-print(f"  EMA Regime Crossover Sharpe:  {ema_sharpe:.2f}  (goal >= 2.00)")
-print("  Caveat: both computed on backtest data only (no live/forward-test equity curve exists")
-print("  yet for either strategy — see indices-system/scorecard.md / equities-system spec for")
+print(f"  ORB_Spread Sharpe:                          {orb_sharpe:.2f}  (goal >= 2.00)")
+print(f"  EMA Regime Crossover Sharpe (original):      {ema_sharpe:.2f}  (goal >= 2.00)")
+print(f"  EMA Regime Crossover Sharpe (+ circuit breaker): {ema_cb_sharpe:.2f}  (goal >= 2.00, gap: {2.0 - ema_cb_sharpe:+.2f})")
+print("  Caveat: all computed on backtest data only (no live/forward-test equity curve exists")
+print("  yet for any strategy — see indices-system/scorecard.md / equities-system spec for")
 print("  current forward-test trade counts). This is a backtest-era baseline, not a live result.")
