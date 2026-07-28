@@ -40,6 +40,17 @@ backtest sized against, per the 2026-07-28 sizing correction -- see
 equities-system/strategies/ema_regime_crossover.md's "Sizing Correction" section).
 This is the more accurate Sharpe estimate for the deployed strategy; the original
 figure above predates this finding and is kept for historical comparison only.
+
+EMA Regime Crossover (portfolio-halt-only, added 2026-07-28 evening): a same-day
+deploy-gap check found the per-symbol same-day loss-block (one of the two mechanics
+in the "+ circuit breaker" block above) was never actually copied to the deployed
+script until 2026-07-28 22:23 IST -- only the portfolio-wide 2% halt was genuinely
+live from 2026-07-17/18 through that point. Source trades are
+ema_regime_crossover_backtest_portfolio_halt_only.py's output (same regime/entry/
+exit rules and Rs 2,50,000 capital base as the circuit-breaker block, portfolio
+halt only, no per-symbol block). This is the Sharpe that actually describes the
+2026-07-17->2026-07-28 22:23 live period; the "+ circuit breaker" block above is
+accurate only from 2026-07-28 22:23 onward.
 """
 
 import os
@@ -138,12 +149,36 @@ ema_cb_sharpe = report(
     basis_note=f"daily portfolio return = day's total pnl_rupees / Rs {EMA_CB_CAPITAL:,}",
 )
 
+# ---------------------------------------------------------------------------
+# EMA Regime Crossover — portfolio-halt-only, isolates what was ACTUALLY live
+# 2026-07-17 -> 2026-07-28 22:23 IST (deploy gap, found + fixed 2026-07-28)
+# ---------------------------------------------------------------------------
+EMA_PHO_CAPITAL = 250_000  # same allocated_capital basis as the circuit-breaker block
+
+ema_pho = pd.read_csv(os.path.join(
+    BASE, "ema_regime_crossover_portfolio_halt_only", "ema_regime_crossover_portfolio_halt_only_trades.csv"
+))
+ema_pho["exit_time"] = pd.to_datetime(ema_pho["exit_time"])
+ema_pho["exit_date"] = ema_pho["exit_time"].dt.date
+
+ema_pho_daily_pnl = ema_pho.groupby("exit_date")["pnl_rupees"].sum()
+ema_pho_daily_return = ema_pho_daily_pnl / EMA_PHO_CAPITAL
+
+ema_pho_sharpe = report(
+    "EMA Regime Crossover (portfolio-halt-only, Rs 2,50,000 capital base) — what was ACTUALLY live 2026-07-17->2026-07-28 22:23",
+    ema_pho_daily_return,
+    n_trades=len(ema_pho),
+    n_days=len(ema_pho_daily_return),
+    basis_note=f"daily portfolio return = day's total pnl_rupees / Rs {EMA_PHO_CAPITAL:,}",
+)
+
 print("=" * 100)
 print("SUMMARY")
 print("=" * 100)
 print(f"  ORB_Spread Sharpe:                          {orb_sharpe:.2f}  (goal >= 2.00)")
-print(f"  EMA Regime Crossover Sharpe (original):      {ema_sharpe:.2f}  (goal >= 2.00)")
-print(f"  EMA Regime Crossover Sharpe (+ circuit breaker): {ema_cb_sharpe:.2f}  (goal >= 2.00, gap: {2.0 - ema_cb_sharpe:+.2f})")
+print(f"  EMA Regime Crossover Sharpe (original, no breaker):        {ema_sharpe:.2f}  (goal >= 2.00)")
+print(f"  EMA Regime Crossover Sharpe (portfolio-halt-only, ACTUAL live 07-17->07-28 22:23): {ema_pho_sharpe:.2f}  (goal >= 2.00, gap: {2.0 - ema_pho_sharpe:+.2f})")
+print(f"  EMA Regime Crossover Sharpe (+ per-symbol block, live from 07-28 22:23 onward):     {ema_cb_sharpe:.2f}  (goal >= 2.00, gap: {2.0 - ema_cb_sharpe:+.2f})")
 print("  Caveat: all computed on backtest data only (no live/forward-test equity curve exists")
 print("  yet for any strategy — see indices-system/scorecard.md / equities-system spec for")
 print("  current forward-test trade counts). This is a backtest-era baseline, not a live result.")
