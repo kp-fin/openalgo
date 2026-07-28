@@ -190,5 +190,65 @@ OpenAlgo's HTTP connection management is well-implemented with httpx connection 
 
 ---
 
-**Audit Date**: January 2026
+## Addendum (2026-07-28): Real-world measurement — Sandbox mode overhead dominates, not broker RTT
+
+Queried `db/latency.db` directly on a live deployment (single-user, paper-trading/Sandbox mode
+only — no live orders). The `OrderLatency` table logs every `/api/v1/` endpoint type (history,
+quotes, orders, etc.), not just order placement — filtering to real order-execution rows
+(`order_type` in `PLACE`/`SMART`/`MODIFY`/... ) gives the true picture, n=135:
+
+| Stage | Median | p90 | p99 |
+|---|---|---|---|
+| Broker RTT (Dhan) | 14.9ms | 88.5ms | 186.7ms |
+| App-side overhead | **1,123ms** | 2,661ms | 4,256ms |
+
+This contradicts the "~200-400ms broker-dominated" estimate above (that estimate was never
+re-measured against real data until now). **Broker network RTT is excellent; the ~1.1s+ overhead
+is entirely self-inflicted, Sandbox-mode-only, and unrelated to network/ISP/hosting location.**
+
+### Root cause
+
+For a Sandbox MARKET order without a pre-fetched quote, `sandbox/order_manager.py` calls
+`ExecutionEngine()._fetch_quote()` to get an LTP for margin-sizing, which hits Dhan's
+`/v2/marketfeed/quote` REST endpoint. That endpoint is rate-limited by Dhan to **1 request/second**,
+enforced in `broker/dhan/api/data.py:_apply_rate_limit()` via a **single global, process-wide** lock
+(`_last_api_call_time["quote"]`) — shared by every quote-type call in the app, including the
+Sandbox execution engine's own periodic background polling for pending orders. If the background
+loop used the slot recently, an order's own quote fetch silently sleeps (debug-logged only) until
+the slot frees, and that wait lands entirely in "overhead" since it's outside the httpx call the
+`rtt_ms` metric measures. `order_manager.py`'s own separate retry backoff (0.3s/0.6s/0.9s) can
+stack on top if the wait causes further attempts.
+
+### Considered fix — declined
+
+`sandbox/position_manager.py` already has a WebSocket-backed quote cache
+(`_fetch_quotes_from_websocket`, via `services/market_data_service.py`, 5s freshness gate before
+REST fallback) used for position MTM. Wiring `order_manager.py`'s quote-fetch to the same cache
+would remove the rate-limit contention for any symbol with a live WS subscription (most
+already-open-position adds/exits), at the cost of trading a guaranteed-live REST price for a
+possibly-stale (up to 5s) cached one on the fill-price/margin-sizing path.
+
+**Karan's call, 2026-07-28: not implementing.** This overhead is Sandbox/Analyzer-mode-only — live
+order placement doesn't do this margin-pre-check quote fetch at all (the broker computes real
+margin itself), so the fix would only speed up paper-trading UX, not progress toward the
+Sharpe≥2 live-trading goal. Not worth the fidelity trade-off for a benefit that doesn't carry to
+live trading.
+
+**Risk flagged for the record, in case this is revisited:** the existing 5s WS-cache freshness
+window (`WEBSOCKET_DATA_MAX_AGE` in `position_manager.py`) is tuned for MTM display, where
+staleness is low-stakes. Reusing it for the fill-price/margin-sizing path would be a real fidelity
+regression, not just a performance trade — a 5s-old Nifty option LTP in the first 15-30 minutes of
+trading (ORB entry window specifically) can be meaningfully off, and Sandbox fill quality directly
+feeds the forward-test evidence the Sharpe≥2 gate depends on. If this is ever revisited, the
+fill-price path should use a materially tighter freshness cutoff (~1-2s) than the MTM path, not
+the same constant.
+
+Also unresolved either way: whether a symbol's WS subscription starts at order-placement time or
+only after a position exists — if the latter, the entry order itself (the most latency-sensitive
+one) would never benefit even if implemented, only adds/exits on already-open positions would.
+Not traced further since the fix was declined.
+
+---
+
+**Audit Date**: January 2026 (original); addendum 2026-07-28
 **Scope**: HTTP connection pooling, order execution latency
