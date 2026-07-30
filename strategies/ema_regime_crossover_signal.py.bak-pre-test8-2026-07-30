@@ -1,58 +1,20 @@
 """
-EMA Regime Crossover — 59-name equity universe — OpenAlgo Forward Test
-Run every 5 minutes: 09:15-15:00 IST (Mon-Fri), but new entries only
-fire within ENTRY_WINDOW_START-ENTRY_WINDOW_END (see below)
-
-DEPLOYED 2026-07-30 from "test #8" of a 17-test charges-aware backtest
-campaign this session (see OpenAlgo/strategies/backtests/
-ema_regime_crossover_backtest_narrow_window_wide_stop_short_only.py and
-FRIDAY vault memory project_ema_wr_sharpe_optimization.md for the full
-trail). Karan's explicit instruction, not a unilateral promotion --
-frozen-strategy-settings still applies to any FUTURE unprompted change.
-
-*** IMPORTANT CAVEAT, do not drop this note in future edits: test #8 is
-STILL NET-NEGATIVE per its own charges-aware backtest -- WR(net) 44.7%,
-Sharpe(net) -0.24, PF(net) 0.96, maxDD 29.8% over 2021-07-01 to
-2026-06-30. It is the LEAST-BAD of 17 tested configurations, not a
-validated profitable strategy. Deployed here as an interim baseline while
-Karan rethinks strategy design from first principles (session finding:
-transaction costs, not signal quality, are the dominant hurdle -- even at
-ZERO charges, test #8's gross Sharpe is only 1.39, still short of the
-1.50 goal). Previous live config backed up to
-ema_regime_crossover_signal.py.bak-pre-test8-2026-07-30 before this change.
-
-Four structural changes from the prior live config, not just parameters:
-1. STOP_ATR_MULT: 1.36 -> 2.2 (wider stop, test #8 finding)
-2. New entries restricted to an 11:45-12:45 IST entry window only (was
-   unrestricted 09:15-15:00) -- open positions still managed/exited on
-   every poll regardless of window, only NEW entries are window-gated.
-3. SHORT-only (LONG entries disabled) -- test #8 finding: LONG side was
-   structurally weaker (PF 0.82 vs SHORT's 1.00 in the diagnostic that
-   led to this).
-4. Universe: static 59-name set (full pinned Nifty 50 candidate pool, no
-   ranking/filtering, + a fixed top-10 Nifty Next 50 subset) replaces the
-   prior dynamic top-10-by-ADV-per-pool (20 names, monthly re-ranked).
-   Test #8 never used ADV ranking for the Nifty 50 portion -- it used the
-   full 49-name pool directly. The monthly refresh_universe() ranking
-   logic is retained in this file for the Next-50 portion's own history
-   but is NOT invoked for entries -- see UNIVERSE below, now a static
-   module-level list instead of state-driven.
+EMA Regime Crossover — 20-name equity universe — OpenAlgo Forward Test
+Run every 5 minutes: 09:15-15:00 IST (Mon-Fri)
 
 Regime (30m, EMA 200): price above EMA200 on 30m -> BULL regime, only
-longs permitted. Below -> BEAR regime, only shorts permitted (LONG is
-disabled entirely per point 3 above, so only the BEAR/SHORT path is live
-now). 30m bars are derived by resampling fetched 15m bars (OpenAlgo
-/api/v1/history has no native 30m interval) -- matches the backtest
-exactly.
+longs permitted. Below -> BEAR regime, only shorts permitted. 30m bars
+are derived by resampling fetched 15m bars (OpenAlgo /api/v1/history has
+no native 30m interval) -- matches the backtest exactly.
 
 Entry (15m, EMA9/EMA20 crossover): bullish cross (9 crosses above 20)
-while in BULL regime -> LONG (disabled, see above). Bearish cross (9
-crosses below 20) while in BEAR regime -> SHORT. Crossovers against the
-current regime are not traded. Regime flip does NOT force-close an open
-position -- it only blocks new entries in the direction no longer in
-regime; an open position rides its own exit rule to completion.
+while in BULL regime -> LONG. Bearish cross (9 crosses below 20) while
+in BEAR regime -> SHORT. Crossovers against the current regime are not
+traded. Regime flip does NOT force-close an open position -- it only
+blocks new entries in the direction no longer in regime; an open
+position rides its own exit rule to completion.
 
-Exit: 2.2xATR(14) stop / 3xATR(14) target on the 15m entry chart, or an
+Exit: 1.36xATR(14) stop / 3xATR(14) target on the 15m entry chart, or an
 opposite EMA9/EMA20 crossover, whichever comes first. Hard exit 15:00
 IST (EOD square-off, matches backtest -- this strategy is intraday
 only, not multi-day). Unlike the backtest (which checks stop/target
@@ -122,17 +84,15 @@ allocated_capital, recomputed each poll -- was a fixed Rs 300 before
 2026-07-18's compounding rule; both the 2% figure and the original Rs 15,000
 base are Karan's own confirmed numbers, 2026-07-17, not an assumption).
 
-Universe (CHANGED 2026-07-30, test #8): static 59-name list -- the full
-Nifty 50 candidate pool (49 names, unranked/unfiltered) + a fixed top-10
-Nifty Next 50 subset by liquidity (also static, not re-ranked). This
-exactly matches what test #8's backtest was run against. Monthly ADV
--based re-ranking (refresh_universe(), still defined below for its
-history and in case of a future revert) is NO LONGER invoked for entries
--- UNIVERSE is now a plain module constant, not read from state. The
-previous live config's universe (top 10 of each pool by trailing 20-day
-ADV, re-ranked monthly) is preserved in
-ema_regime_crossover_signal.py.bak-pre-test8-2026-07-30 if this needs to
-be reverted.
+Universe: top 10 Nifty 50 + top 10 Nifty Next 50 by trailing 20-day
+average daily traded value, re-ranked on the first poll of each new
+calendar month (confirmed monthly cadence, 2026-07-17). The CANDIDATE
+POOL itself (the ~49+49 names below) is held static -- re-ranking picks
+top 10 from WITHIN this fixed pool, it does not re-fetch actual NSE
+index membership (no clean source for that exists in this vault, per
+universe_ranking.py's own note). A name dropping out of the monthly
+top-10 blocks new entries only -- an existing open position rides to
+its own exit, matching the regime-flip precedent (confirmed 2026-07-17).
 
 State persisted to state/ema_regime_crossover_state.json (intraday
 positions/P&L reset daily at hard exit; universe/month persists).
@@ -169,15 +129,10 @@ REGIME_EMA       = 200
 ENTRY_FAST       = 9
 ENTRY_SLOW       = 20
 ATR_PERIOD       = 14
-STOP_ATR_MULT    = 2.2      # widened from 1.36, test #8 (2026-07-30)
+STOP_ATR_MULT    = 1.36
 TARGET_ATR_MULT  = 3.0
 HARD_EXIT        = dtime(15, 0)
 CANDLE_LOOKBACK_DAYS = 60   # comfortably covers 200x30m-bar EMA warmup (~16 trading days) with buffer
-
-ENTRY_WINDOW_START = dtime(11, 45)   # test #8 (2026-07-30) -- new entries only fire in this window
-ENTRY_WINDOW_END   = dtime(12, 45)   # open positions are still managed/exited outside this window
-
-SHORT_ONLY = True   # test #8 (2026-07-30) -- LONG entries disabled, see module docstring
 
 ASSUMED_MIS_LEVERAGE = 5          # "up to 5x", varies stock-to-stock per Karan -- planning ceiling only,
                                    # real Dhan MIS margin at order time is the actual gate (see module docstring)
@@ -213,13 +168,6 @@ NIFTY_NEXT_50 = [
     "TORNTPHARM", "VBL", "MAZDOCK", "IRFC", "LODHA", "HYUNDAI", "ENRIN", "TATACAP",
     "TMCV",
 ]
-
-# test #8 (2026-07-30): static 59-name universe, exactly matching the backtest --
-# full NIFTY_50 pool (unranked) + this fixed top-10 NIFTY_NEXT_50 subset (also
-# unranked). Replaces the prior dynamic top-10-per-pool-by-ADV universe.
-NEXT50_TOP10 = ["ADANIPOWER", "VEDL", "CGPOWER", "LODHA", "ADANIENSOL",
-                "ADANIGREEN", "TORNTPHARM", "TVSMOTOR", "CANBK", "TMCV"]
-UNIVERSE = NIFTY_50 + NEXT50_TOP10
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state", "ema_regime_crossover_state.json")
 os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
@@ -441,13 +389,20 @@ def main():
 
     state = load_state()
 
-    # test #8 (2026-07-30): universe is now the static UNIVERSE module constant
-    # (59 names, matches the backtest exactly) -- the monthly ADV-based
-    # refresh_universe() ranking is no longer invoked for entries. Function
-    # kept below for its history / in case of a future revert to the prior
-    # dynamic-universe live config (see ema_regime_crossover_signal.py.bak
-    # -pre-test8-2026-07-30).
-    universe = UNIVERSE
+    # ── Monthly universe refresh (first poll of a new calendar month) ────────
+    this_month = now.strftime("%Y-%m")
+    if state["universe_month"] != this_month:
+        try:
+            state["universe"] = refresh_universe()
+            state["universe_month"] = this_month
+            save_state(state)
+        except Exception as e:
+            log.error(f"Universe refresh failed, keeping previous universe: {e}")
+            if not state["universe"]:
+                log.error("No universe available at all — cannot proceed this poll.")
+                return
+
+    universe = state["universe"]
     positions = state["positions"]
 
     # ── Hard exit: square off everything, stop for the day ───────────────────
@@ -579,12 +534,6 @@ def main():
     if state["daily_loss_halted"]:
         return
 
-    # test #8 (2026-07-30): new entries only fire within ENTRY_WINDOW_START-
-    # ENTRY_WINDOW_END IST. Open positions are unaffected -- they're managed
-    # above, before this check, on every poll regardless of window.
-    if not (ENTRY_WINDOW_START <= t <= ENTRY_WINDOW_END):
-        return
-
     # ── New entries: regime + crossover aligned, no existing position in the
     #    symbol, under the global concurrency cap ────────────────────────────
     if len(positions) >= MAX_CONCURRENT:
@@ -610,8 +559,6 @@ def main():
         elif bool(last["bear_cross"]) and last["regime"] == "BEAR":
             direction = "SHORT"
         if direction is None:
-            continue
-        if SHORT_ONLY and direction == "LONG":
             continue
 
         atr = float(last["atr"])
