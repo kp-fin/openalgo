@@ -37,6 +37,11 @@ TRADE_LOG_COLUMNS = {
         "date", "symbol", "direction", "entry_time", "entry_price",
         "exit_time", "exit_price", "qty", "pnl_rupees", "reason", "mode",
     ],
+    "ema_regime_crossover_swing_cnc": [
+        "date", "symbol", "direction", "entry_time", "entry_price",
+        "exit_time", "exit_price", "qty", "pnl_rupees", "charges_rupees",
+        "net_pnl_rupees", "reason", "hold_days", "group", "mode",
+    ],
 }
 
 
