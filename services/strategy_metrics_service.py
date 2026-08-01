@@ -72,6 +72,43 @@ def annualised_sharpe(daily_returns: pd.Series) -> float:
     return daily_returns.mean() / daily_returns.std(ddof=1) * np.sqrt(TRADING_DAYS_PER_YEAR)
 
 
+# Direction labels differ per strategy (LONG/SHORT for the equities strategies,
+# bull/bear for ORB_Spread's debit-spread legs) -- normalize to LONG/SHORT so
+# the directional breakdown below is strategy-agnostic.
+_LONG_LABELS = {"long", "bull"}
+_SHORT_LABELS = {"short", "bear"}
+
+
+def _normalize_direction(direction_series: pd.Series) -> pd.Series:
+    lowered = direction_series.str.lower()
+    return lowered.map(
+        lambda d: "LONG" if d in _LONG_LABELS else ("SHORT" if d in _SHORT_LABELS else None)
+    )
+
+
+def _profit_factor(df: pd.DataFrame):
+    if df.empty:
+        return None
+    gross_win = df.loc[df["pnl_rupees"] > 0, "pnl_rupees"].sum()
+    gross_loss = abs(df.loc[df["pnl_rupees"] <= 0, "pnl_rupees"].sum())
+    return (gross_win / gross_loss) if gross_loss > 0 else float("inf")
+
+
+def _max_consecutive_losses(pnl_ordered: pd.Series) -> int:
+    """Breakeven (pnl <= 0) counts as a loss, matching this module's own
+    gross_loss convention above. Caller must pass trades in exit-chronological
+    order -- this walks the sequence as given, it does not sort."""
+    max_streak = 0
+    current = 0
+    for pnl in pnl_ordered:
+        if pnl <= 0:
+            current += 1
+            max_streak = max(max_streak, current)
+        else:
+            current = 0
+    return max_streak
+
+
 def compute_strategy_metrics(strategy_key, mode_filter=None):
     """mode_filter: None (all trades), 'paper', or 'live' -- lets the report
     break out paper vs live evidence separately once a strategy goes live."""
@@ -87,7 +124,11 @@ def compute_strategy_metrics(strategy_key, mode_filter=None):
             "n_trades": 0, "win_rate": None, "profit_factor": None, "avg_pnl": None,
             "sharpe": None, "daily_returns": pd.Series(dtype=float),
             "allocated_capital": allocated_capital,
+            "long_pf": None, "long_n": 0, "short_pf": None, "short_n": 0,
+            "max_consecutive_losses": None,
         }
+
+    df = df.sort_values("exit_time")
 
     n = len(df)
     wins = int((df["pnl_rupees"] > 0).sum())
@@ -101,10 +142,18 @@ def compute_strategy_metrics(strategy_key, mode_filter=None):
     daily_returns = daily_pnl / allocated_capital
     sharpe = annualised_sharpe(daily_returns)
 
+    dir_norm = _normalize_direction(df["direction"])
+    long_df = df[dir_norm == "LONG"]
+    short_df = df[dir_norm == "SHORT"]
+    max_consecutive_losses = _max_consecutive_losses(df["pnl_rupees"])
+
     return {
         "n_trades": n, "win_rate": win_rate, "profit_factor": profit_factor,
         "avg_pnl": avg_pnl, "sharpe": sharpe, "daily_returns": daily_returns,
         "allocated_capital": allocated_capital,
+        "long_pf": _profit_factor(long_df), "long_n": len(long_df),
+        "short_pf": _profit_factor(short_df), "short_n": len(short_df),
+        "max_consecutive_losses": max_consecutive_losses,
     }
 
 
@@ -180,6 +229,24 @@ def build_report() -> str:
 
     lines += [
         "",
+        "## Directional & Streak Risk",
+        "",
+        "| Strategy | Long PF (n) | Short PF (n) | Max Consecutive Losses |",
+        "|---|---|---|---|",
+    ]
+    for key, info in STRATEGIES.items():
+        m = metrics[key]
+        if m["n_trades"] == 0:
+            lines.append(f"| {info['name']} | — | — | — |")
+            continue
+        long_str = f"{_fmt_pf(m['long_pf'])} ({m['long_n']})" if m["long_n"] else "— (0)"
+        short_str = f"{_fmt_pf(m['short_pf'])} ({m['short_n']})" if m["short_n"] else "— (0)"
+        lines.append(
+            f"| {info['name']} | {long_str} | {short_str} | {m['max_consecutive_losses']} |"
+        )
+
+    lines += [
+        "",
         "## Cross-Strategy Correlation (all pairs)",
         "",
     ]
@@ -212,6 +279,12 @@ def build_report() -> str:
         f"suppressed, just not yet meaningful.",
         "- This is a paper-and-live-combined view by default (no mode filter). All trades right "
         "now are paper — see each strategy's own spec for forward-test trade counts and context.",
+        "- Directional PF normalizes each strategy's own direction labels (LONG/SHORT for the "
+        "equities strategies, bull/bear for ORB_Spread's debit-spread legs) to LONG/SHORT. Max "
+        "consecutive losses counts breakeven (P&L <= 0) as a loss, matching this report's own "
+        "profit-factor convention, and walks trades in exit-chronological order. Gate thresholds "
+        "for these (e.g. EMA Regime Crossover's long-side PF >= 1.0, max consecutive losses < 8) "
+        "live in each strategy's own spec, not here — this report is descriptive, not pass/fail.",
         "",
         "---",
         "",
