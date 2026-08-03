@@ -37,13 +37,13 @@ TRADE_LOG_COLUMNS = {
         "date", "symbol", "direction", "entry_time", "entry_price",
         "exit_time", "exit_price", "qty", "pnl_rupees", "reason", "mode",
     ],
-    "ema_regime_crossover_swing_cnc": [
+    "ema_regime_crossover_swing_cnc_top15nifty100": [
         "date", "symbol", "direction", "entry_time", "entry_price",
         "exit_time", "exit_price", "qty", "pnl_rupees", "charges_rupees",
         "net_pnl_rupees", "reason", "hold_days", "group", "mode",
     ],
-    "ema_regime_crossover_swing_cnc_top15nifty100": [
-        "date", "symbol", "direction", "entry_time", "entry_price",
+    "hh_hl_pullback_breakout_nifty200": [
+        "date", "symbol", "direction", "entry_price",
         "exit_time", "exit_price", "qty", "pnl_rupees", "charges_rupees",
         "net_pnl_rupees", "reason", "hold_days", "group", "mode",
     ],

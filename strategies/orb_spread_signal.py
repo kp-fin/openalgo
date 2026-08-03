@@ -9,14 +9,21 @@ Bullish Reject -> Bull Call Spread (BUY ATM CE + SELL OTM1 CE)
 Lower High     -> Bear Put Spread  (confirmation, if no primary)
 Higher Low     -> Bull Call Spread (confirmation, if no primary)
 Range day skip: price inside OR at 10:15 -> no new entries today
-Previous-day filter: if yesterday's net directional move exceeds
-PREV_MOVE_THRESHOLD -> no new entries today (added 2026-07-16, see
-"Previous-Day Net Move" test in orb_spread.md -- backtest: quiet prior
-day PF 1.38 (397 trades) vs big-trend prior day PF 0.98 (395 trades),
-essentially a coin-flip loser. Fails OPEN (does not block trading) if
-the fetch fails -- this is an added filter on an already-working
-strategy, not a risk control, so a fetch outage should not blank the
-whole day.
+Previous-day filter (direction-aware, changed 2026-08-04): if yesterday's
+net directional move exceeds PREV_MOVE_THRESHOLD, BULL (CE) entries are
+blocked for the day but BEAR (PE) entries are still allowed. Added
+2026-07-16 as a blanket block on both directions (backtest: quiet prior
+day PF 1.38 vs big-trend prior day PF 0.98); direction split tested
+2026-07-23 (big-trend SHORT PF 1.16 vs LONG PF 0.84 -- LONG is the weak
+side, not SHORT) and re-verified 2026-08-03 against the adopted 50pt/15%
+spread model (candidate rule spread PF 4.50 vs current-live 4.64, but
++45% more total spread points, 8,180 vs 5,654 -- see orb_spread.md,
+"Previous-Day Net Move" and "Direction-Aware Big-Trend Filter" sections).
+Karan's call 2026-08-04: adopt the direction-aware version, accepting the
+modest PF dilution for the absolute P&L gain. Fails OPEN (does not block
+trading) if the fetch fails -- this is an added filter on an
+already-working strategy, not a risk control, so a fetch outage should
+not blank the whole day.
 
 Exit decision is based on NIFTY SPOT movement, not spread premium percent
 — matches the backtest methodology exactly (indices-system/strategies/orb_spread.md,
@@ -502,9 +509,11 @@ def main():
     if state["range_day"]:
         log.info("Range day — no new entries.")
         return
-    if state.get("prev_move_pct") is not None and state["prev_move_pct"] > PREV_MOVE_THRESHOLD:
-        log.info(f"Prev-day move {state['prev_move_pct']:.2f}% > {PREV_MOVE_THRESHOLD}% threshold — no new entries.")
-        return
+    big_trend_day = (state.get("prev_move_pct") is not None
+                      and state["prev_move_pct"] > PREV_MOVE_THRESHOLD)
+    if big_trend_day:
+        log.info(f"Prev-day move {state['prev_move_pct']:.2f}% > {PREV_MOVE_THRESHOLD}% threshold — "
+                  f"BULL entries blocked today, BEAR entries still allowed (direction-aware filter, 2026-08-04).")
 
     # ── Signal detection ──────────────────────────────────────────────────────
     try:
@@ -578,7 +587,11 @@ def main():
                 log.error(f"Bear entry failed: {e}")
 
         # ── Enter Bull Call Spread ─────────────────────────────────────────────
-        if bull_signal and not state["bull_traded"] and not state["bull_position"]:
+        if bull_signal and big_trend_day:
+            log.info(f"BULL signal {bull_signal} skipped — big-trend prior day "
+                      f"({state['prev_move_pct']:.2f}% > {PREV_MOVE_THRESHOLD}%), only BEAR allowed "
+                      f"through on big-trend days (direction-aware filter, 2026-08-04).")
+        elif bull_signal and not state["bull_traded"] and not state["bull_position"]:
             try:
                 net_debit_est, margin_per_lot, long_sym, short_sym = estimate_spread_capital_requirement("CE")
                 quantity = compute_lot_quantity(net_debit_est, margin_per_lot)
