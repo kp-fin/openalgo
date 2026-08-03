@@ -1408,6 +1408,34 @@ _BARS_PER_DAY = {
 }
 
 
+def _clip_to_range(df, start_date: str, end_date: str):
+    """Clip a history DataFrame to an inclusive calendar-date window.
+
+    Some broker history endpoints return an extra trailing (or leading) session
+    beyond the requested start_date/end_date — confirmed 2026-08-03 on narrow
+    single-day 15m requests, which came back with 2 full trading days (50 bars,
+    not the 25 a single day should give). Left unclipped, downstream bar-count
+    trimming (_df_records' `.tail(limit)`) silently keeps the extra day instead
+    of the requested one whenever `limit` is smaller than the over-fetched
+    range, with no error — the caller gets correctly-shaped but wrong-day data.
+    Clip defensively right after fetch so every caller of _load_history is
+    protected, not just the ones that happen to request a wide enough window.
+    """
+    idx = df.index
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    dates = idx.normalize()
+    mask = (dates >= pd.Timestamp(start_date)) & (dates <= pd.Timestamp(end_date))
+    clipped = df.loc[mask]
+    if clipped.empty:
+        raise ValueError(
+            f"no bars found within {start_date}..{end_date} after clipping "
+            f"an over-fetched range ({df.index[0]}..{df.index[-1]}) — check for "
+            f"a market holiday, weekend, or a date the broker has no data for"
+        )
+    return clipped
+
+
 def _load_history(
     symbol: str,
     exchange: str,
@@ -1428,7 +1456,8 @@ def _load_history(
     """
     end = end_date or date.today().isoformat()
     if start_date:
-        return _history_df(symbol, exchange, interval, start_date, end, source)
+        df = _history_df(symbol, exchange, interval, start_date, end, source)
+        return _clip_to_range(df, start_date, end)
     if lookback_days:
         start = (date.fromisoformat(end) - timedelta(days=int(lookback_days))).isoformat()
         return _history_df(symbol, exchange, interval, start, end, source)
