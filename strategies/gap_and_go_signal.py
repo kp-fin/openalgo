@@ -413,7 +413,7 @@ def main():
             sig = qualify_symbol(sym)
             if sig is not None:
                 signals[sym] = sig
-            time.sleep(0.1)
+            time.sleep(1.2)  # stay under Dhan's 1 req/s quote-endpoint cap (DHAN_QUOTE_INTERVAL=1.1s in broker/dhan/api/data.py) — each symbol's daily-history call also triggers a quote call; 0.1s was tripping error 805
         state["qualification_done"] = True
         log.info(f"Qualification complete: {len(signals)} names qualified today")
         save_state(state)
