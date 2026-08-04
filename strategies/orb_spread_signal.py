@@ -39,17 +39,25 @@ naked-long PF 1.14 and a 100pt/35%-cost spread's PF 0.30. Real cost is
 whatever the market actually charges at entry, not an assumption — this
 script tracks it directly from live leg prices.
 
-Execution (reworked 2026-07-22): BOTH entry and exit place two plain
-/api/v1/placeorder calls against exact, pre-resolved symbols. Entry
-trades the same symbols that were resolved and quoted during sizing
+Execution (reworked 2026-07-22, legs batched 2026-08-04): entry and exit
+each place BOTH legs in a single /api/v1/basketorder call (was two
+sequential /api/v1/placeorder calls) against exact, pre-resolved symbols.
+Entry trades the same symbols that were resolved and quoted during sizing
 (estimate_spread_capital_requirement) — previously entry re-resolved
 ATM/OTM1 offsets via /api/v1/optionsmultiorder moments after sizing,
 and spot ticking across a strike boundary in between could open a
-different strike than the one sized. Leg ordering is live-safe: entry
-buys the long leg before selling the short (hedge exists first); exit
-buys the short back before selling the long (never leaves the short
-momentarily naked). Exit records per-leg completion in state so a
-partial failure retried next tick never re-sends an already-closed leg.
+different strike than the one sized. Batching does NOT make this one
+atomic broker-side order — Dhan has no such API for NFO spreads, checked
+2026-08-04 (/v2/margincalculator/multi is margin-query only; /alerts/multi/orders
+is a conditional/alert order, not atomic execution) — it shrinks the
+wall-clock gap between the two legs filling versus fully sequential
+placeorder calls. Leg ordering stays live-safe (basketorder sorts BUY
+before SELL server-side): entry buys the long leg before selling the
+short (hedge exists first); exit buys the short back before selling the
+long (never leaves the short momentarily naked). Exit records per-leg
+completion in state so a partial failure retried next tick never
+re-sends an already-closed leg — and falls back to a single plain
+placeorder call if only one leg remains open (nothing left to batch).
 Exit still deliberately never re-resolves offsets — by exit time spot
 has moved (that's why we're exiting), so "ATM" could map to a different
 strike than what we actually hold.
@@ -302,6 +310,48 @@ def place_order(symbol, action, quantity):
     r.raise_for_status()
     return r.json()
 
+def place_basket(legs):
+    """Fire a list of (symbol, action, quantity) legs as ONE /api/v1/basketorder
+    call instead of N sequential /api/v1/placeorder calls (changed 2026-08-04).
+
+    Dhan has no true atomic multi-leg combo-order execution API for NFO option
+    spreads (checked: /v2/margincalculator/multi is a margin QUERY, not an
+    order-placement endpoint; /alerts/multi/orders is a conditional/alert order,
+    not atomic execution) -- so this does not turn the spread into one broker-
+    side order. What it DOES do: OpenAlgo's basket endpoint sorts BUY-before-
+    SELL and dispatches legs via a ThreadPoolExecutor (parallel, not
+    fully-sequential-await), shrinking the wall-clock gap between the two legs
+    filling versus this script's old two-sequential-placeorder-calls approach.
+    The exchange's own real-time SPAN margin engine still only recognizes the
+    hedge once both legs actually exist in the position book -- placing them
+    together doesn't skip that, it just gets there faster with less naked-leg
+    exposure window. Same BUY-before-SELL ordering this script already relied
+    on for hedge-safety is enforced server-side regardless of the order legs
+    are listed in here.
+
+    Returns the basket response's per-leg results list:
+    [{"symbol": ..., "status": "success"/"error", "orderid"/"message": ...}, ...]
+    """
+    orders = [
+        {"exchange": "NFO", "symbol": symbol, "action": action, "quantity": quantity,
+         "pricetype": "MARKET", "product": "MIS"}
+        for symbol, action, quantity in legs
+    ]
+    r = requests.post(f"{HOST}/api/v1/basketorder",
+                      json={"apikey": API_KEY, "strategy": "orb_spread", "orders": orders},
+                      headers=_headers(), timeout=20)
+    r.raise_for_status()
+    data = r.json()
+    if data.get("status") != "success":
+        raise RuntimeError(f"Basket order API error: {data}")
+    return data.get("results", [])
+
+def _leg_result(results, symbol):
+    for r in results:
+        if r.get("symbol") == symbol:
+            return r
+    return None
+
 def open_spread_legs(long_symbol, short_symbol, quantity):
     """Open the debit spread on the EXACT symbols already resolved and sized
     (estimate_spread_capital_requirement) -- replaces the old
@@ -310,20 +360,27 @@ def open_spread_legs(long_symbol, short_symbol, quantity):
     sized if spot ticked across a strike boundary in between (fixed
     2026-07-22).
 
-    Leg order matters live: BUY the long leg FIRST, then SELL the short --
-    the hedge exists before the short is opened, so a real broker never
-    sees a naked short (margin spike / outright rejection risk). If the
-    short leg fails after the long filled, retry once, then close the long
-    (compensating SELL) and abort the entry -- never leave a silent naked
-    long that no exit logic knows the true shape of.
+    Both legs are now submitted as ONE /api/v1/basketorder call (changed
+    2026-08-04, see place_basket() docstring) rather than two sequential
+    /api/v1/placeorder calls -- the basket endpoint still sorts BUY before
+    SELL server-side, so the hedge-safety ordering (long exists before the
+    short is opened) is preserved, just with less wall-clock gap between the
+    two legs filling. If the short leg comes back failed while the long
+    succeeded, retry the short alone once, then close the long (compensating
+    SELL) and abort the entry -- never leave a silent naked long that no exit
+    logic knows the true shape of.
 
     Returns (long_ltp, short_ltp) -- post-order quotes, the entry-fill
     proxies used for entry_net_debit tracking."""
-    place_order(long_symbol, "BUY", quantity)
-    try:
-        place_order(short_symbol, "SELL", quantity)
-    except Exception as first_err:
-        log.warning(f"Short leg SELL failed after long leg filled ({first_err}) — retrying once")
+    results = place_basket([(long_symbol, "BUY", quantity), (short_symbol, "SELL", quantity)])
+    long_result = _leg_result(results, long_symbol)
+    short_result = _leg_result(results, short_symbol)
+
+    if not long_result or long_result.get("status") != "success":
+        raise RuntimeError(f"Long leg BUY failed: {long_result}")
+
+    if not short_result or short_result.get("status") != "success":
+        log.warning(f"Short leg SELL failed after long leg filled ({short_result}) — retrying once")
         try:
             place_order(short_symbol, "SELL", quantity)
         except Exception:
@@ -334,7 +391,8 @@ def open_spread_legs(long_symbol, short_symbol, quantity):
             except Exception:
                 log.critical(f"COMPENSATING CLOSE FAILED — naked long {long_symbol} x{quantity} "
                              f"may be live; MANUAL INTERVENTION NEEDED")
-            raise
+            raise RuntimeError(f"Short leg SELL failed twice: {short_result}")
+
     quotes = get_multiquotes([(long_symbol, "NFO"), (short_symbol, "NFO")])
     return quotes[long_symbol], quotes[short_symbol]
 
@@ -343,23 +401,46 @@ def close_spread(pos):
     offsets, since spot has moved since entry (that's why we're exiting)
     and re-resolving ATM/OTM1 now could target a different strike.
 
-    Leg order flipped 2026-07-22: BUY back the short leg FIRST, then SELL
-    the long -- closing the long first leaves the short momentarily naked,
-    which a real broker can margin-reject mid-exit. Per-leg completion is
+    Both legs are submitted as ONE /api/v1/basketorder call (changed
+    2026-08-04, see place_basket() docstring) when neither leg has closed
+    yet. The basket endpoint sorts BUY before SELL server-side -- short-leg
+    BUY-to-close still lands before long-leg SELL, preserving the
+    hedge-safety ordering this script already relied on (closing the long
+    first would leave the short momentarily naked). Per-leg completion is
     recorded on the position dict (persisted via state) so a partial
     failure retried next tick does NOT re-send a leg that already closed --
-    re-sending would flip or double the position instead of closing it.
+    re-sending would flip or double the position instead of closing it. If
+    only one leg remains open (a prior partial close), that single leg is
+    sent via the plain /api/v1/placeorder call instead of a one-order
+    basket, since there is no second leg left to batch it with.
 
     Returns (long_exit_ltp, short_exit_ltp) -- post-order quotes, so the
     caller can log REAL fill-based P&L (see log_closed_trade(), fixed
     2026-07-21) instead of a modeled estimate."""
     qty = pos["quantity"]
-    if not pos.get("short_leg_closed"):
-        place_order(pos["short_symbol"], "BUY", qty)
-        pos["short_leg_closed"] = True
-    if not pos.get("long_leg_closed"):
-        place_order(pos["long_symbol"], "SELL", qty)
-        pos["long_leg_closed"] = True
+    short_open = not pos.get("short_leg_closed")
+    long_open = not pos.get("long_leg_closed")
+
+    if short_open and long_open:
+        results = place_basket([(pos["short_symbol"], "BUY", qty), (pos["long_symbol"], "SELL", qty)])
+        short_result = _leg_result(results, pos["short_symbol"])
+        long_result = _leg_result(results, pos["long_symbol"])
+        if short_result and short_result.get("status") == "success":
+            pos["short_leg_closed"] = True
+        else:
+            raise RuntimeError(f"Short leg BUY-to-close failed: {short_result}")
+        if long_result and long_result.get("status") == "success":
+            pos["long_leg_closed"] = True
+        else:
+            raise RuntimeError(f"Long leg SELL-to-close failed: {long_result}")
+    else:
+        if short_open:
+            place_order(pos["short_symbol"], "BUY", qty)
+            pos["short_leg_closed"] = True
+        if long_open:
+            place_order(pos["long_symbol"], "SELL", qty)
+            pos["long_leg_closed"] = True
+
     quotes = get_multiquotes([(pos["long_symbol"], "NFO"), (pos["short_symbol"], "NFO")])
     return quotes[pos["long_symbol"]], quotes[pos["short_symbol"]]
 
