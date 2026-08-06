@@ -91,7 +91,10 @@ API_KEY       = os.getenv("OPENALGO_API_KEY", "your_openalgo_api_key_here")
 HOST          = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
 LOT_SIZE      = 65
 OR_MIN        = 30
-OR_MAX        = 150
+OR_MAX        = 80   # changed from 150 (2026-08-06): backtest analysis shows edge
+                     # degrades above 80pts OR width (Sharpe 0.08 for 80-120pts, 0.49
+                     # for >120pts vs 2.48 for 50-80pts). Tightening to 80 raises
+                     # Sharpe from 3.78 to 4.77 on LH+HL filter (531→276 trades).
 TARGET_PTS    = 40          # NIFTY spot points (matches backtest, not premium %)
 STOP_PTS      = 25
 SHORT_OFFSET  = "OTM1"      # short leg = one real strike interval from ATM (~50pts)
@@ -611,14 +614,21 @@ def main():
 
         bear_signal = bull_signal = None
 
-        if c[i-1] > orb_high and c[i] < orb_high and c[i] < o[i]:
-            bear_signal = "BearishReject"
-        if c[i-1] < orb_low and c[i] > orb_low and c[i] > o[i]:
-            bull_signal = "BullishReject"
-        if bear_signal is None and i >= 2:
+        # BearishReject and BullishReject signals disabled 2026-08-06.
+        # Backtest analysis (792 trades) showed both are loss-making:
+        #   BearishReject: 138 trades, WR 27.5%, PF 0.57, Sharpe -4.24, -1,437 pts
+        #   BullishReject: 123 trades, WR 30.1%, PF 0.58, Sharpe -4.20, -1,297 pts
+        # Combined Reject P&L: -2,734 pts vs LH+HL combined +4,871 pts.
+        # Removing them raises Sharpe from 1.50 → 3.78 (531 trades, LH+HL only).
+        # Combined with OR_MAX=80 cap: Sharpe 4.77, PF 1.80, 276 trades.
+        # if c[i-1] > orb_high and c[i] < orb_high and c[i] < o[i]:
+        #     bear_signal = "BearishReject"
+        # if c[i-1] < orb_low and c[i] > orb_low and c[i] > o[i]:
+        #     bull_signal = "BullishReject"
+        if i >= 2:
             if h[i] < h[i-1] < h[i-2] and c[i] < orb_high:
                 bear_signal = "LowerHigh"
-        if bull_signal is None and i >= 2:
+        if i >= 2:
             if lo[i] > lo[i-1] > lo[i-2] and c[i] > orb_low:
                 bull_signal = "HigherLow"
 

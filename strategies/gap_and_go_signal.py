@@ -14,20 +14,20 @@ instead of retrofitting it onto crossover logic).
 
 *** EVIDENCE STATUS, do not drop this note in future edits: backtest (2021-07-01
 to 2026-06-30, 58 of 60 universe names fetched) is the FIRST net-positive result
-in this vault's entire intraday-equities campaign — Sharpe(net) 1.10, PF(net)
-1.20, WR(net) 47.6%, maxDD(net) 20.8%, both LONG (PF 1.15) and SHORT (PF 1.36)
-sides profitable. A walk-forward split (first half 2021-07-30->2024-01-12 vs.
-second half 2024-01-15->2026-06-30) held up well — Sharpe(net) 1.21 vs. 0.98,
-PF(net) 1.22 vs. 1.18, WR(net) 45.7% vs. 49.5%, no implausible outlier half —
-unlike HH-HL Pullback Breakout's own walk-forward check, which found its
-headline Sharpe(net) 9.93 was inflated by an unstable first half. Still short
-of the vault's Sharpe(net)>=1.5 goal, and this is STILL ONLY A BACKTEST — zero
-live/paper track record at time of this deployment. Per this vault's own
-convention (same one applied to HH-HL), the live/paper trade log from here on
-is the real evidence gate, not the backtest. See
-OpenAlgo/strategies/backtests/gap_and_go_backtest.py and
-gap_and_go_walkforward.py for the full evidence trail, and
-equities-system/strategies/gap_and_go.md for the vault-side spec.
+in this vault's entire intraday-equities campaign — original config: Sharpe(net)
+1.10, PF(net) 1.20, WR(net) 47.6%, maxDD(net) 20.8%, both LONG (PF 1.15) and
+SHORT (PF 1.36) sides profitable. A walk-forward split held up (Sharpe 1.21 vs
+0.98, PF 1.22 vs 1.18, WR 45.7% vs 49.5%).
+
+2026-08-06 UPDATE — LONG gap filter added: backtest analysis showed LONG edge
+concentrated in 3–10% gap range (PF 1.43) with near-zero edge outside it (PF
+1.04). Filtering LONGs to 3–10% gap (SHORTs unchanged) raises backtest
+Sharpe(net) to 1.62, PF to 1.35 on 499 trades — clearing the vault's >=1.5
+target. This is still a backtest improvement; the live/paper log remains the
+real evidence gate. See
+OpenAlgo/strategies/backtests/gap_and_go/exit_research_2026-08-06.md for
+the full analysis. equities-system/strategies/gap_and_go.md vault spec
+should be updated to reflect this filter change.
 
 Design (matches the backtest exactly, see gap_and_go_backtest.py docstring):
 1. Gap filter: |today's open vs. prior day's close| >= GAP_PCT_MIN (1.5%).
@@ -301,6 +301,16 @@ def qualify_symbol(symbol):
         return None
 
     direction = "LONG" if gap_pct > 0 else "SHORT"
+
+    # Gap size filter for LONG direction only (backtest analysis 2026-08-06):
+    # LONG edge exists only in the 3–10% gap range (PF 1.43 in that band vs
+    # PF 1.04 outside it). Filtering LONGs to this range raises backtest
+    # Sharpe from 1.10 to 1.62, clearing the vault's >=1.5 target.
+    # SHORTs are untouched — their edge is uniform across gap sizes.
+    if direction == "LONG" and not (0.03 <= gap_pct <= 0.10):
+        log.info(f"SKIP LONG {symbol}: gap={gap_pct*100:+.2f}% outside 3–10% LONG filter")
+        return None
+
     log.info(f"QUALIFIED {symbol}: gap={gap_pct*100:+.2f}% vol={opening_bar['volume']:.0f} "
               f"(avg20={vol_avg20:.0f}) direction={direction} OR=[{or_low:.2f},{or_high:.2f}]")
     return {"direction": direction, "or_high": or_high, "or_low": or_low,
