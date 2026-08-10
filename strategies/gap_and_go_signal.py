@@ -82,7 +82,6 @@ import sys
 import time
 from datetime import date, datetime, time as dtime, timedelta
 
-import numpy as np
 import pandas as pd
 import pytz
 import requests
@@ -134,13 +133,13 @@ os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
 # ── State helpers ─────────────────────────────────────────────────────────────
 def load_state():
     today = str(date.today())
+    s = {}
     if os.path.exists(STATE_FILE):
         try:
-            s = json.load(open(STATE_FILE))
+            with open(STATE_FILE) as f:
+                s = json.load(f)
         except Exception:
             s = {}
-    else:
-        s = {}
 
     if s.get("date") != today:
         s = {
@@ -160,7 +159,8 @@ def load_state():
 
 
 def save_state(s):
-    json.dump(s, open(STATE_FILE, "w"), default=str)
+    with open(STATE_FILE, "w") as f:
+        json.dump(s, f, default=str)
 
 
 # ── OpenAlgo helpers ──────────────────────────────────────────────────────────
@@ -168,18 +168,18 @@ def _headers():
     return {"Content-Type": "application/json"}
 
 
-def get_candles_15m(symbol, lookback_days=CANDLE_LOOKBACK_DAYS):
+def get_candles(symbol, interval="15m", lookback_days=CANDLE_LOOKBACK_DAYS):
     end = date.today().isoformat()
     start = (date.today() - timedelta(days=lookback_days)).isoformat()
     try:
         r = requests.post(f"{HOST}/api/v1/history",
                            json={"apikey": API_KEY, "symbol": symbol, "exchange": "NSE",
-                                 "interval": "15m", "start_date": start, "end_date": end},
+                                 "interval": interval, "start_date": start, "end_date": end},
                            headers=_headers(), timeout=20)
         r.raise_for_status()
         data = r.json()
         if data.get("status") != "success" or not data.get("data"):
-            log.warning(f"{symbol}: 15m history fetch failed: {data}")
+            log.warning(f"{symbol}: {interval} history fetch failed: {data}")
             return pd.DataFrame()
         df = pd.DataFrame(data["data"])
         df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
@@ -187,29 +187,7 @@ def get_candles_15m(symbol, lookback_days=CANDLE_LOOKBACK_DAYS):
         df.columns = [c.lower() for c in df.columns]
         return df
     except Exception as e:
-        log.warning(f"{symbol}: 15m history fetch error: {e}")
-        return pd.DataFrame()
-
-
-def get_candles_daily(symbol, lookback_days=45):
-    end = date.today().isoformat()
-    start = (date.today() - timedelta(days=lookback_days)).isoformat()
-    try:
-        r = requests.post(f"{HOST}/api/v1/history",
-                           json={"apikey": API_KEY, "symbol": symbol, "exchange": "NSE",
-                                 "interval": "D", "start_date": start, "end_date": end},
-                           headers=_headers(), timeout=20)
-        r.raise_for_status()
-        data = r.json()
-        if data.get("status") != "success" or not data.get("data"):
-            return pd.DataFrame()
-        df = pd.DataFrame(data["data"])
-        df["datetime"] = pd.to_datetime(df["timestamp"], unit="s", utc=True).dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
-        df = df.set_index("datetime").sort_index()
-        df.columns = [c.lower() for c in df.columns]
-        return df
-    except Exception as e:
-        log.warning(f"{symbol}: daily history fetch error: {e}")
+        log.warning(f"{symbol}: {interval} history fetch error: {e}")
         return pd.DataFrame()
 
 
@@ -225,6 +203,10 @@ def get_multiquotes(symbols):
     if data.get("status") != "success":
         raise RuntimeError(data)
     return {res["symbol"]: float(res["data"]["ltp"]) for res in data["results"]}
+
+
+def _signed_pnl(pos, px):
+    return (px - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
 
 
 def log_closed_trade(sym, pos, exit_px, pnl, reason, now):
@@ -257,12 +239,12 @@ def qualify_symbol(symbol):
     """Returns a signal dict if the symbol clears the gap+volume filter today,
     else None. Matches gap_and_go_backtest.py's generate-candidates logic
     exactly: gap_pct from today's open vs. prior day's close, opening 15m bar
-    volume vs. its own trailing 20-session average for that same slot."""
-    df15 = get_candles_15m(symbol)
+    volume vs. its own trailing 20-session average for that same slot.
+
+    Prior close is the last 15m close before today (equals prior daily close on
+    NSE cash when the last bar of the prior session is present)."""
+    df15 = get_candles(symbol)
     if df15.empty:
-        return None
-    dfd = get_candles_daily(symbol)
-    if dfd.empty or len(dfd) < 2:
         return None
 
     today = date.today()
@@ -273,11 +255,12 @@ def qualify_symbol(symbol):
         return None
     opening_bar = todays_opening.iloc[0]
 
-    dfd = dfd.sort_index()
-    prior_days = dfd[dfd.index.date < today]
-    if prior_days.empty:
+    # ponytail: last prior 15m close == daily prior close when prior session's
+    # final bar is present; falls back only by rejecting the symbol if missing.
+    prior_bars = df15[df15["day"] < today]
+    if prior_bars.empty:
         return None
-    prior_close = float(prior_days.iloc[-1]["close"])
+    prior_close = float(prior_bars.iloc[-1]["close"])
     if prior_close <= 0:
         return None
     gap_pct = (float(opening_bar["open"]) - prior_close) / prior_close
@@ -355,7 +338,7 @@ def main():
                                   f"logging P&L as unverified (reason HARD_EXIT_NOPRICE)")
                         log_closed_trade(sym, pos, pos["entry_price"], 0.0, "HARD_EXIT_NOPRICE", now)
                     else:
-                        pnl = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
+                        pnl = _signed_pnl(pos, ltp)
                         state["daily_realized_pnl"] += pnl
                         log.info(f"EXIT HARD {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit~={ltp:.2f} pnl~={pnl:+.0f}")
                         log_closed_trade(sym, pos, ltp, pnl, "HARD_EXIT", now)
@@ -390,14 +373,14 @@ def main():
                     reason = "TARGET"
 
             if reason is None:
-                pnl_now = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
+                pnl_now = _signed_pnl(pos, ltp)
                 log.info(f"HOLD {pos['direction']} {sym} entry={pos['entry_price']:.2f} ltp={ltp:.2f} pnl~={pnl_now:+.0f}")
                 continue
 
             try:
                 exit_action = "SELL" if pos["direction"] == "LONG" else "BUY"
                 place_order(sym, exit_action, pos["qty"])
-                pnl = (ltp - pos["entry_price"]) * pos["qty"] * (1 if pos["direction"] == "LONG" else -1)
+                pnl = _signed_pnl(pos, ltp)
                 state["daily_realized_pnl"] += pnl
                 log.info(f"EXIT {reason} {pos['direction']} {sym} entry={pos['entry_price']:.2f} exit={ltp:.2f} pnl={pnl:+.0f}")
                 log_closed_trade(sym, pos, ltp, pnl, reason, now)
