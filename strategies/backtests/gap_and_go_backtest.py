@@ -51,11 +51,12 @@ if not API_KEY:
 HOST = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
 START_DATE = "2021-07-01"
 END_DATE = "2026-06-30"
+FILTER_LONG = os.getenv("GAG_FILTER_LONG", "0") == "1"  # LONG gap-size filter (3-10%), added 2026-08-06 -- matches currently deployed config when =1
+VOL_LOOKBACK_DAYS = int(os.getenv("GAG_VOL_LOOKBACK", "20"))  # trailing avg window for opening-bar volume baseline
 IST = pytz.timezone("Asia/Kolkata")
 
 GAP_PCT_MIN = 0.015          # 1.5% minimum overnight gap
 VOL_MULT = 1.5               # opening 15m volume must be >= 1.5x trailing avg
-VOL_LOOKBACK_DAYS = 20        # trailing average window for the opening-bar volume baseline
 ENTRY_CUTOFF = dtime(10, 30)  # opening-range breakout must confirm by this time
 TARGET_RANGE_MULT = 2.0       # target = entry + 2x opening-range width
 HARD_EXIT = dtime(15, 0)
@@ -139,7 +140,8 @@ def compute_charges(entry_price, exit_price, qty):
 
 
 print(f"Universe: {len(UNIVERSE)} names | Gap threshold: {GAP_PCT_MIN*100:.1f}% | "
-      f"Volume mult: {VOL_MULT}x | Entry cutoff: {ENTRY_CUTOFF} IST")
+      f"Volume mult: {VOL_MULT}x | Vol lookback: {VOL_LOOKBACK_DAYS}d | "
+      f"LONG filter: {FILTER_LONG} | Entry cutoff: {ENTRY_CUTOFF} IST")
 all_trades = []
 skipped = {}
 rejected_gap = 0
@@ -183,6 +185,8 @@ for symbol in UNIVERSE:
     n_trades_before = len(all_trades)
     for day, qrow in qualifying_days.iterrows():
         direction = "LONG" if qrow["gap_pct"] > 0 else "SHORT"
+        if FILTER_LONG and direction == "LONG" and not (0.03 <= qrow["gap_pct"] <= 0.10):
+            continue
         or_high, or_low = qrow["high"], qrow["low"]
         or_width = or_high - or_low
         if or_width <= 0:
@@ -311,7 +315,12 @@ for _, cand in trades_df.iterrows():
     heapq.heappush(pending_exits, (cand["exit_time"], seq, t))
 
 result_df = pd.DataFrame(accepted)
-result_df.to_csv(os.path.join(OUT_DIR, "gap_and_go_trades.csv"), index=False)
+_tag = f"vol{VOL_LOOKBACK_DAYS}" + ("_filtered" if FILTER_LONG else "")
+trades_csv = os.path.join(OUT_DIR, f"gap_and_go_trades_{_tag}.csv")
+result_df.to_csv(trades_csv, index=False)
+# keep legacy filename only for the original 20d / unfiltered baseline
+if VOL_LOOKBACK_DAYS == 20 and not FILTER_LONG:
+    result_df.to_csv(os.path.join(OUT_DIR, "gap_and_go_trades.csv"), index=False)
 
 print(f"Rejected -- concurrency cap: {rejected_cap} | daily halt: {rejected_halt} | per-symbol block: {rejected_symbol_block}")
 
@@ -368,4 +377,12 @@ dd_df["dd_net"] = dd_df["cum_pnl_net"] - dd_df["peak_net"]
 max_dd = dd_df["dd_net"].min()
 print(f"\nMax drawdown (net): Rs {max_dd:,.0f} ({abs(max_dd)/ALLOCATED_CAPITAL*100:.1f}% of allocated capital)")
 
-print(f"\nTrade log -> {OUT_DIR}/gap_and_go_trades.csv")
+avg_dd_all = dd_df["dd_net"].mean()  # mean of the whole underwater series (incl. zero/at-peak points)
+underwater = dd_df[dd_df["dd_net"] < 0]["dd_net"]
+avg_dd_underwater = underwater.mean() if len(underwater) else 0.0
+print(f"Avg drawdown (net, all trade-exit points): Rs {avg_dd_all:,.0f} "
+      f"({abs(avg_dd_all)/ALLOCATED_CAPITAL*100:.2f}% of allocated capital)")
+print(f"Avg drawdown (net, underwater points only, n={len(underwater)}/{len(dd_df)}): "
+      f"Rs {avg_dd_underwater:,.0f} ({abs(avg_dd_underwater)/ALLOCATED_CAPITAL*100:.2f}% of allocated capital)")
+
+print(f"\nTrade log -> {trades_csv}")
