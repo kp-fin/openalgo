@@ -108,7 +108,19 @@ def get_api_response(endpoint, auth, method="POST", payload="", retry_count=0):
     logger.debug(f"Response status: {res.status}")
     logger.debug(f"Response: {json.dumps(response, indent=2)}")
 
-    # Handle Dhan API error codes
+    error_mapping = {
+        "805": "Rate limit exceeded. Please wait before making more requests.",
+        "806": "Data APIs not subscribed. Please subscribe to Dhan's market data service.",
+        "810": "Authentication failed: Invalid client ID",
+        "401": "Invalid or expired access token",
+        "820": "Market data subscription required",
+        "821": "Market data subscription required",
+        # Charts/history use DH-* codes instead of the marketfeed status=failed shape.
+        "DH-901": "Invalid or expired access token",
+        "DH-902": "Data APIs not subscribed. Please subscribe to Dhan's market data service.",
+    }
+
+    # Handle Dhan API error codes (marketfeed style: status=failed + data{code:msg})
     if response.get("status") == "failed":
         error_data = response.get("data", {})
         error_code = list(error_data.keys())[0] if error_data else "unknown"
@@ -123,15 +135,16 @@ def get_api_response(endpoint, auth, method="POST", payload="", retry_count=0):
             time.sleep(retry_delay)
             return get_api_response(endpoint, auth, method, payload, retry_count + 1)
 
-        error_mapping = {
-            "805": "Rate limit exceeded. Please wait before making more requests.",
-            "806": "Data APIs not subscribed. Please subscribe to Dhan's market data service.",
-            "810": "Authentication failed: Invalid client ID",
-            "401": "Invalid or expired access token",
-            "820": "Market data subscription required",
-            "821": "Market data subscription required",
-        }
+        error_msg = error_mapping.get(error_code, f"Dhan API Error {error_code}: {error_message}")
+        logger.error(f"API Error: {error_msg}")
+        raise Exception(error_msg)
 
+    # Charts/history style: HTTP body with errorType/errorCode and no candle arrays.
+    # Without this, callers see response.get("timestamp", []) == [] and return
+    # empty success — which made every strategy look "quiet" on 2026-08-12.
+    if response.get("errorCode") or response.get("errorType"):
+        error_code = str(response.get("errorCode") or "unknown")
+        error_message = response.get("errorMessage") or response.get("errorType") or "Unknown error"
         error_msg = error_mapping.get(error_code, f"Dhan API Error {error_code}: {error_message}")
         logger.error(f"API Error: {error_msg}")
         raise Exception(error_msg)
@@ -529,7 +542,11 @@ class BrokerData:
                                 }
                             )
                     except Exception as e:
+                        # Don't swallow auth/subscription failures into an empty
+                        # DataFrame — that becomes {'data':[], 'status':'success'}
+                        # at the API layer and strategies look "quiet" instead of broken.
                         logger.error(f"Error fetching intraday data: {str(e)}")
+                        raise
                 else:
                     # For multiple days, split into chunks
                     date_chunks = self._get_intraday_chunks(start_date, end_date)
