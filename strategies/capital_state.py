@@ -47,6 +47,11 @@ TRADE_LOG_COLUMNS = {
         "date", "symbol", "direction", "entry_time", "entry_price",
         "exit_time", "exit_price", "qty", "pnl_rupees", "reason", "mode",
     ],
+    "orb_asym": [
+        "date", "entry_time", "direction", "signal", "entry_spot", "exit_time",
+        "exit_spot", "pnl_pts", "entry_net_debit", "exit_net_debit", "pnl_rupees",
+        "reason", "mode",
+    ],
 }
 
 
