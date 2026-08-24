@@ -311,17 +311,27 @@ class FundManager:
                     return False, "Funds not initialized"
 
                 amount = Decimal(str(amount))
+                current = Decimal(str(funds.used_margin or 0))
+                # Never drive used_margin below zero (qty*avg vs fill-block mismatch)
+                transfer = min(amount, current) if current > 0 else Decimal("0")
 
                 # Reduce used margin (release from used_margin)
                 # But do NOT credit available_balance - money is now in holdings
-                funds.used_margin -= amount
+                funds.used_margin = current - transfer
 
                 db_session.commit()
 
-                logger.debug(
-                    f"Transferred ₹{amount} margin to holdings for user {self.user_id}. {description}"
-                )
-                return True, f"Margin transferred to holdings: ₹{amount}"
+                if transfer != amount:
+                    logger.warning(
+                        f"T+1 margin transfer clamped for user {self.user_id}: "
+                        f"requested ₹{amount}, transferred ₹{transfer}, "
+                        f"used_margin was ₹{current}. {description}"
+                    )
+                else:
+                    logger.debug(
+                        f"Transferred ₹{amount} margin to holdings for user {self.user_id}. {description}"
+                    )
+                return True, f"Margin transferred to holdings: ₹{transfer}"
 
             except Exception as e:
                 db_session.rollback()

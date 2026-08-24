@@ -298,10 +298,9 @@ def log_closed_trade(direction, reason, pos, spot, pnl_pts, exit_net, now):
 
 
 def can_fit_margin(margin_1unit):
-    """Skip if 1 butterfly unit exceeds per-direction capital slice."""
+    """Skip only if 1 butterfly unit exceeds the full allocated book."""
     allocated = get_allocated_capital(CAPITAL_KEY)
-    per_side = allocated * 0.40  # same 80%/2 pattern as ORB_Spread
-    return margin_1unit <= per_side
+    return margin_1unit <= allocated
 
 
 def main():
@@ -424,7 +423,7 @@ def main():
             try:
                 atm, body, far, net_est, margin, _q = resolve_butterfly("PE")
                 if not can_fit_margin(margin):
-                    log.info(f"BEAR skipped — 1-unit margin Rs {margin:,.0f} exceeds per-side capital")
+                    log.info(f"BEAR skipped — 1-unit margin Rs {margin:,.0f} exceeds allocated capital")
                 else:
                     try:
                         entry_spot = get_nifty_spot()
@@ -450,7 +449,7 @@ def main():
             try:
                 atm, body, far, net_est, margin, _q = resolve_butterfly("CE")
                 if not can_fit_margin(margin):
-                    log.info(f"BULL skipped — 1-unit margin Rs {margin:,.0f} exceeds per-side capital")
+                    log.info(f"BULL skipped — 1-unit margin Rs {margin:,.0f} exceeds allocated capital")
                 else:
                     try:
                         entry_spot = get_nifty_spot()

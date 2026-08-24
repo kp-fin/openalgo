@@ -33,6 +33,19 @@ class HoldingsManager:
     def __init__(self, user_id):
         self.user_id = user_id
 
+    @staticmethod
+    def _settlement_margin(position):
+        """Use the margin actually blocked on the position; fall back to notional.
+
+        qty * avg can disagree with the fill-time block (charges/leverage rounding),
+        which previously drove used_margin negative on T+1 (VEDL CNC: blocked
+        33318, transferred 33342 → used_margin -24).
+        """
+        blocked = Decimal(str(getattr(position, "margin_blocked", 0) or 0))
+        if blocked > 0:
+            return blocked
+        return abs(Decimal(str(position.quantity))) * Decimal(str(position.average_price or 0))
+
     def get_holdings(self, update_mtm=True):
         """
         Get all holdings for the user
@@ -183,7 +196,7 @@ class HoldingsManager:
                         )
 
                         # Transfer margin from used_margin to holdings (don't credit available_balance)
-                        margin_amount = abs(position.quantity) * position.average_price
+                        margin_amount = self._settlement_margin(position)
                         fund_manager.transfer_margin_to_holdings(
                             margin_amount, f"T+1 settlement: {position.symbol} BUY → Holdings"
                         )
@@ -229,7 +242,7 @@ class HoldingsManager:
                     db_session.add(holding)
 
                     # Transfer margin from used_margin to holdings (don't credit available_balance)
-                    margin_amount = abs(position.quantity) * position.average_price
+                    margin_amount = self._settlement_margin(position)
                     fund_manager.transfer_margin_to_holdings(
                         margin_amount, f"T+1 settlement: {position.symbol} → Holdings"
                     )

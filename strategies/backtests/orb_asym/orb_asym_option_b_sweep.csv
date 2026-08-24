@@ -1,0 +1,14 @@
+n,wr,pf,total,sharpe,n_target,n_stop,n_hard,sigma,rule
+255,50.6,5.71,4400.7,12.77,122,122,11,intrinsic-7.5,locked v2 (cannot skip credits)
+255,79.2,3.98,214.1,7.48,122,122,11,10%,B off
+56,94.6,17.87,82.5,18.38,31,23,2,10%,B on skip net<=0 skipped=199
+56,57.1,7.47,1163.7,16.07,31,23,2,10%,"B on, intrinsic of kept skipped=199"
+255,78.4,4.56,223.8,7.39,122,122,11,12%,B off
+34,97.1,288.45,57.5,26.23,21,12,1,12%,B on skip net<=0 skipped=221
+34,64.7,10.21,828.7,18.39,21,12,1,12%,"B on, intrinsic of kept skipped=221"
+255,76.5,4.94,223.0,6.85,122,122,11,15%,B off
+9,100.0,inf,15.4,40.6,7,2,0,15%,B on skip net<=0 skipped=246
+9,77.8,19.83,282.5,22.6,7,2,0,15%,"B on, intrinsic of kept skipped=246"
+255,75.7,5.42,209.0,5.91,122,122,11,20%,B off
+0,,,0.0,,0,0,0,20%,B on skip net<=0 skipped=255
+0,,,0.0,,0,0,0,20%,"B on, intrinsic of kept skipped=255"

@@ -51,7 +51,11 @@ if not API_KEY:
 HOST = os.getenv("OPENALGO_HOST", "http://127.0.0.1:5000")
 START_DATE = "2021-07-01"
 END_DATE = "2026-06-30"
-FILTER_LONG = os.getenv("GAG_FILTER_LONG", "0") == "1"  # LONG gap-size filter (3-10%), added 2026-08-06 -- matches currently deployed config when =1
+FILTER_LONG = os.getenv("GAG_FILTER_LONG", "0") == "1"  # LONG gap-size filter, added 2026-08-06 -- matches currently deployed config when =1
+LONG_GAP_MIN = float(os.getenv("GAG_LONG_MIN", "0.03"))  # used when FILTER_LONG=1
+LONG_GAP_MAX = float(os.getenv("GAG_LONG_MAX", "0.10"))
+# GAG_AB=1: one fetch, then portfolio-sim each LONG band (SHORTs always kept). No live deploy.
+RUN_AB = os.getenv("GAG_AB", "0") == "1"
 VOL_LOOKBACK_DAYS = int(os.getenv("GAG_VOL_LOOKBACK", "20"))  # trailing avg window for opening-bar volume baseline
 IST = pytz.timezone("Asia/Kolkata")
 
@@ -141,7 +145,8 @@ def compute_charges(entry_price, exit_price, qty):
 
 print(f"Universe: {len(UNIVERSE)} names | Gap threshold: {GAP_PCT_MIN*100:.1f}% | "
       f"Volume mult: {VOL_MULT}x | Vol lookback: {VOL_LOOKBACK_DAYS}d | "
-      f"LONG filter: {FILTER_LONG} | Entry cutoff: {ENTRY_CUTOFF} IST")
+      f"LONG filter: {FILTER_LONG} ({LONG_GAP_MIN*100:.1f}-{LONG_GAP_MAX*100:.0f}%) | "
+      f"AB={RUN_AB} | Entry cutoff: {ENTRY_CUTOFF} IST")
 all_trades = []
 skipped = {}
 rejected_gap = 0
@@ -185,7 +190,10 @@ for symbol in UNIVERSE:
     n_trades_before = len(all_trades)
     for day, qrow in qualifying_days.iterrows():
         direction = "LONG" if qrow["gap_pct"] > 0 else "SHORT"
-        if FILTER_LONG and direction == "LONG" and not (0.03 <= qrow["gap_pct"] <= 0.10):
+        # AB mode keeps all LONG gaps (>= GAP_PCT_MIN); band filter applied post-fetch.
+        if (not RUN_AB) and FILTER_LONG and direction == "LONG" and not (
+            LONG_GAP_MIN <= qrow["gap_pct"] <= LONG_GAP_MAX
+        ):
             continue
         or_high, or_low = qrow["high"], qrow["low"]
         or_width = or_high - or_low
@@ -262,127 +270,182 @@ capital_per_trade = ALLOCATED_CAPITAL * POSITION_PCT
 buying_power = capital_per_trade * ASSUMED_MIS_LEVERAGE
 daily_loss_limit = DAILY_LOSS_PCT * ALLOCATED_CAPITAL
 
-pending_exits = []
-seq = 0
-open_count = 0
-current_day = None
-daily_realized_pnl = 0.0
-daily_loss_halted = False
-daily_blocked = set()
-
-accepted = []
-rejected_cap, rejected_halt, rejected_symbol_block = 0, 0, 0
-
-for _, cand in trades_df.iterrows():
-    qty = int(buying_power // cand["entry_price"])
-    pnl_rupees = qty * cand["entry_price"] * cand["pnl_pct"]
-
-    while pending_exits and pending_exits[0][0] <= cand["entry_time"]:
-        ex_time, _, ex_trade = heapq.heappop(pending_exits)
-        if ex_time.date() == current_day:
-            daily_realized_pnl += ex_trade["pnl_rupees"]
-            if ex_trade["pnl_rupees"] < 0:
-                daily_blocked.add(ex_trade["symbol"])
-        open_count -= 1
-
-    if cand["entry_time"].date() != current_day:
-        current_day = cand["entry_time"].date()
-        daily_realized_pnl = 0.0
-        daily_loss_halted = False
-        daily_blocked = set()
-
-    if daily_realized_pnl <= -daily_loss_limit:
-        daily_loss_halted = True
-    if daily_loss_halted:
-        rejected_halt += 1
-        continue
-    if cand["symbol"] in daily_blocked:
-        rejected_symbol_block += 1
-        continue
-    if open_count >= MAX_CONCURRENT:
-        rejected_cap += 1
-        continue
-
-    t = cand.to_dict()
-    t["qty"] = qty
-    t["pnl_rupees"] = round(pnl_rupees, 2)
-    charges = compute_charges(cand["entry_price"], cand["exit_price"], qty)
-    t.update(charges)
-    t["net_pnl_rupees"] = round(pnl_rupees - charges["total_charges"], 2)
-    accepted.append(t)
-    open_count += 1
-    seq += 1
-    heapq.heappush(pending_exits, (cand["exit_time"], seq, t))
-
-result_df = pd.DataFrame(accepted)
-_tag = f"vol{VOL_LOOKBACK_DAYS}" + ("_filtered" if FILTER_LONG else "")
-trades_csv = os.path.join(OUT_DIR, f"gap_and_go_trades_{_tag}.csv")
-result_df.to_csv(trades_csv, index=False)
-# keep legacy filename only for the original 20d / unfiltered baseline
-if VOL_LOOKBACK_DAYS == 20 and not FILTER_LONG:
-    result_df.to_csv(os.path.join(OUT_DIR, "gap_and_go_trades.csv"), index=False)
-
-print(f"Rejected -- concurrency cap: {rejected_cap} | daily halt: {rejected_halt} | per-symbol block: {rejected_symbol_block}")
-
-if result_df.empty:
-    print("\nNo trades survived portfolio simulation.")
-    raise SystemExit(0)
-
-n = len(result_df)
-wr_gross = (result_df["pnl_rupees"] > 0).mean() * 100
-wr_net = (result_df["net_pnl_rupees"] > 0).mean() * 100
-total_gross = result_df["pnl_rupees"].sum()
-total_charges = result_df["total_charges"].sum()
-total_net = result_df["net_pnl_rupees"].sum()
-
-gw = result_df[result_df["pnl_rupees"] > 0]["pnl_rupees"].sum()
-gl = abs(result_df[result_df["pnl_rupees"] <= 0]["pnl_rupees"].sum())
-pf_gross = gw / gl if gl > 0 else float("inf")
-nw = result_df[result_df["net_pnl_rupees"] > 0]["net_pnl_rupees"].sum()
-nl = abs(result_df[result_df["net_pnl_rupees"] <= 0]["net_pnl_rupees"].sum())
-pf_net = nw / nl if nl > 0 else float("inf")
-
-print(f"\n=== Gap-and-Go with Volume Confirmation ===")
-print(f"Trades: {n} | WR (gross): {wr_gross:.1f}% | WR (net): {wr_net:.1f}%")
-print(f"Gross P&L: Rs {total_gross:+,.0f} | PF (gross): {pf_gross:.2f}")
-print(f"Charges  : Rs {total_charges:,.0f}")
-print(f"Net P&L  : Rs {total_net:+,.0f} | PF (net): {pf_net:.2f}")
-print(f"Exit breakdown: {result_df['reason'].value_counts().to_dict()}")
-
-print("\nBy direction (net of charges):")
-for direction, g in result_df.groupby("direction"):
-    gw2 = g[g.net_pnl_rupees > 0]["net_pnl_rupees"].sum()
-    gl2 = abs(g[g.net_pnl_rupees <= 0]["net_pnl_rupees"].sum())
-    pf2 = gw2 / gl2 if gl2 > 0 else float("inf")
-    print(f"  {direction:6s} n={len(g):5d}  WR(net)={(g.net_pnl_rupees>0).mean()*100:5.1f}%  "
-          f"PF(net)={pf2:.2f}  total_net=Rs{g.net_pnl_rupees.sum():+10,.0f}")
-
-result_df["exit_time"] = pd.to_datetime(result_df["exit_time"])
-result_df["exit_date"] = result_df["exit_time"].dt.date
-daily_net = result_df.groupby("exit_date")["net_pnl_rupees"].sum() / ALLOCATED_CAPITAL
-daily_gross = result_df.groupby("exit_date")["pnl_rupees"].sum() / ALLOCATED_CAPITAL
 
 def sharpe(s):
     if len(s) < 2 or s.std(ddof=1) == 0:
         return float("nan")
     return s.mean() / s.std(ddof=1) * np.sqrt(252)
 
-print(f"\nSharpe (gross): {sharpe(daily_gross):.2f}")
-print(f"Sharpe (net)  : {sharpe(daily_net):.2f}   (goal: >= 1.50)")
 
-dd_df = result_df.sort_values("exit_time").reset_index(drop=True)
-dd_df["cum_pnl_net"] = dd_df["net_pnl_rupees"].cumsum()
-dd_df["peak_net"] = dd_df["cum_pnl_net"].cummax()
-dd_df["dd_net"] = dd_df["cum_pnl_net"] - dd_df["peak_net"]
-max_dd = dd_df["dd_net"].min()
-print(f"\nMax drawdown (net): Rs {max_dd:,.0f} ({abs(max_dd)/ALLOCATED_CAPITAL*100:.1f}% of allocated capital)")
+def apply_long_band(df, band):
+    """band=None keeps all; else (lo, hi) keeps SHORTs + LONGs in [lo, hi]."""
+    if band is None:
+        return df
+    lo, hi = band
+    keep = (df["direction"] == "SHORT") | (
+        (df["direction"] == "LONG") & (df["gap_pct"] >= lo) & (df["gap_pct"] <= hi)
+    )
+    return df.loc[keep].sort_values("entry_time").reset_index(drop=True)
 
-avg_dd_all = dd_df["dd_net"].mean()  # mean of the whole underwater series (incl. zero/at-peak points)
-underwater = dd_df[dd_df["dd_net"] < 0]["dd_net"]
-avg_dd_underwater = underwater.mean() if len(underwater) else 0.0
-print(f"Avg drawdown (net, all trade-exit points): Rs {avg_dd_all:,.0f} "
-      f"({abs(avg_dd_all)/ALLOCATED_CAPITAL*100:.2f}% of allocated capital)")
-print(f"Avg drawdown (net, underwater points only, n={len(underwater)}/{len(dd_df)}): "
-      f"Rs {avg_dd_underwater:,.0f} ({abs(avg_dd_underwater)/ALLOCATED_CAPITAL*100:.2f}% of allocated capital)")
 
-print(f"\nTrade log -> {trades_csv}")
+def simulate_portfolio(cands):
+    pending_exits = []
+    seq = 0
+    open_count = 0
+    current_day = None
+    daily_realized_pnl = 0.0
+    daily_loss_halted = False
+    daily_blocked = set()
+    accepted = []
+    rejected_cap = rejected_halt = rejected_symbol_block = 0
+
+    for _, cand in cands.iterrows():
+        qty = int(buying_power // cand["entry_price"])
+        pnl_rupees = qty * cand["entry_price"] * cand["pnl_pct"]
+
+        while pending_exits and pending_exits[0][0] <= cand["entry_time"]:
+            ex_time, _, ex_trade = heapq.heappop(pending_exits)
+            if ex_time.date() == current_day:
+                daily_realized_pnl += ex_trade["pnl_rupees"]
+                if ex_trade["pnl_rupees"] < 0:
+                    daily_blocked.add(ex_trade["symbol"])
+            open_count -= 1
+
+        if cand["entry_time"].date() != current_day:
+            current_day = cand["entry_time"].date()
+            daily_realized_pnl = 0.0
+            daily_loss_halted = False
+            daily_blocked = set()
+
+        if daily_realized_pnl <= -daily_loss_limit:
+            daily_loss_halted = True
+        if daily_loss_halted:
+            rejected_halt += 1
+            continue
+        if cand["symbol"] in daily_blocked:
+            rejected_symbol_block += 1
+            continue
+        if open_count >= MAX_CONCURRENT:
+            rejected_cap += 1
+            continue
+
+        t = cand.to_dict()
+        t["qty"] = qty
+        t["pnl_rupees"] = round(pnl_rupees, 2)
+        charges = compute_charges(cand["entry_price"], cand["exit_price"], qty)
+        t.update(charges)
+        t["net_pnl_rupees"] = round(pnl_rupees - charges["total_charges"], 2)
+        accepted.append(t)
+        open_count += 1
+        seq += 1
+        heapq.heappush(pending_exits, (cand["exit_time"], seq, t))
+
+    return (
+        pd.DataFrame(accepted),
+        {"cap": rejected_cap, "halt": rejected_halt, "symbol_block": rejected_symbol_block},
+    )
+
+
+def metrics(result_df):
+    if result_df.empty:
+        return {
+            "n": 0, "long_n": 0, "short_n": 0, "wr_net": float("nan"),
+            "pf_net": float("nan"), "net_pnl": 0.0, "sharpe_net": float("nan"),
+            "max_dd_pct": float("nan"),
+        }
+    n = len(result_df)
+    wr_net = (result_df["net_pnl_rupees"] > 0).mean() * 100
+    nw = result_df[result_df["net_pnl_rupees"] > 0]["net_pnl_rupees"].sum()
+    nl = abs(result_df[result_df["net_pnl_rupees"] <= 0]["net_pnl_rupees"].sum())
+    pf_net = nw / nl if nl > 0 else float("inf")
+    total_net = result_df["net_pnl_rupees"].sum()
+    rdf = result_df.copy()
+    rdf["exit_time"] = pd.to_datetime(rdf["exit_time"])
+    rdf["exit_date"] = rdf["exit_time"].dt.date
+    daily_net = rdf.groupby("exit_date")["net_pnl_rupees"].sum() / ALLOCATED_CAPITAL
+    dd = rdf.sort_values("exit_time").reset_index(drop=True)
+    dd["cum"] = dd["net_pnl_rupees"].cumsum()
+    dd["peak"] = dd["cum"].cummax()
+    dd["dd"] = dd["cum"] - dd["peak"]
+    max_dd_pct = abs(dd["dd"].min()) / ALLOCATED_CAPITAL * 100
+    return {
+        "n": n,
+        "long_n": int((rdf["direction"] == "LONG").sum()),
+        "short_n": int((rdf["direction"] == "SHORT").sum()),
+        "wr_net": wr_net,
+        "pf_net": pf_net,
+        "net_pnl": total_net,
+        "sharpe_net": sharpe(daily_net),
+        "max_dd_pct": max_dd_pct,
+    }
+
+
+def print_metrics(label, result_df, rej):
+    m = metrics(result_df)
+    print(f"\n=== {label} ===")
+    print(f"Rejected -- concurrency cap: {rej['cap']} | daily halt: {rej['halt']} | "
+          f"per-symbol block: {rej['symbol_block']}")
+    if result_df.empty:
+        print("No trades survived portfolio simulation.")
+        return m
+    print(f"Trades: {m['n']} (LONG {m['long_n']} / SHORT {m['short_n']})")
+    print(f"WR (net): {m['wr_net']:.1f}% | PF (net): {m['pf_net']:.2f} | "
+          f"Net P&L: Rs {m['net_pnl']:+,.0f}")
+    print(f"Sharpe (net): {m['sharpe_net']:.2f} | Max DD (net): {m['max_dd_pct']:.1f}%")
+    print("By direction (net):")
+    for direction, g in result_df.groupby("direction"):
+        gw2 = g[g.net_pnl_rupees > 0]["net_pnl_rupees"].sum()
+        gl2 = abs(g[g.net_pnl_rupees <= 0]["net_pnl_rupees"].sum())
+        pf2 = gw2 / gl2 if gl2 > 0 else float("inf")
+        print(f"  {direction:6s} n={len(g):5d}  WR(net)={(g.net_pnl_rupees>0).mean()*100:5.1f}%  "
+              f"PF(net)={pf2:.2f}  total_net=Rs{g.net_pnl_rupees.sum():+10,.0f}")
+    return m
+
+
+# A/B: one fetch, re-run portfolio sim per LONG band (SHORTs unchanged).
+AB_BANDS = [
+    ("unfiltered (LONG gap>=1.5%, no upper cap)", None),
+    ("LONG 1.5-10%", (0.015, 0.10)),
+    ("LONG 2-10%", (0.02, 0.10)),
+    ("LONG 3-10% (deployed)", (0.03, 0.10)),
+]
+
+if RUN_AB:
+    candidates_csv = os.path.join(OUT_DIR, f"gap_and_go_candidates_vol{VOL_LOOKBACK_DAYS}.csv")
+    trades_df.to_csv(candidates_csv, index=False)
+    print(f"\nCandidates (pre-portfolio) -> {candidates_csv}")
+    rows = []
+    for label, band in AB_BANDS:
+        subset = apply_long_band(trades_df, band)
+        result_df, rej = simulate_portfolio(subset)
+        m = print_metrics(label, result_df, rej)
+        rows.append({"band": label, **m})
+        tag = "unfiltered" if band is None else f"long{int(band[0]*1000):03d}_{int(band[1]*100)}"
+        out = os.path.join(OUT_DIR, f"gap_and_go_trades_vol{VOL_LOOKBACK_DAYS}_{tag}.csv")
+        if not result_df.empty:
+            result_df.to_csv(out, index=False)
+            if band is None and VOL_LOOKBACK_DAYS == 20:
+                result_df.to_csv(os.path.join(OUT_DIR, "gap_and_go_trades.csv"), index=False)
+            if band == (0.03, 0.10) and VOL_LOOKBACK_DAYS == 20:
+                result_df.to_csv(os.path.join(OUT_DIR, "gap_and_go_trades_vol20_filtered.csv"), index=False)
+
+    ab_df = pd.DataFrame(rows)
+    ab_csv = os.path.join(OUT_DIR, f"gap_and_go_long_band_ab_vol{VOL_LOOKBACK_DAYS}.csv")
+    ab_df.to_csv(ab_csv, index=False)
+    print("\n=== A/B SUMMARY (LONG band only; SHORTs identical across rows) ===")
+    print(ab_df.to_string(index=False))
+    print(f"\nA/B summary -> {ab_csv}")
+else:
+    result_df, rej = simulate_portfolio(trades_df)
+    _tag = f"vol{VOL_LOOKBACK_DAYS}" + ("_filtered" if FILTER_LONG else "")
+    trades_csv = os.path.join(OUT_DIR, f"gap_and_go_trades_{_tag}.csv")
+    result_df.to_csv(trades_csv, index=False)
+    if VOL_LOOKBACK_DAYS == 20 and not FILTER_LONG:
+        result_df.to_csv(os.path.join(OUT_DIR, "gap_and_go_trades.csv"), index=False)
+    label = (
+        f"Gap-and-Go LONG {LONG_GAP_MIN*100:.1f}-{LONG_GAP_MAX*100:.0f}%"
+        if FILTER_LONG else "Gap-and-Go unfiltered"
+    )
+    print_metrics(label, result_df, rej)
+    if not result_df.empty:
+        print(f"\nTrade log -> {trades_csv}")
