@@ -1,27 +1,17 @@
 """
 Per-symbol MTF (Margin Trading Facility) leverage table -- Nifty 100.
 
-Real Dhan margincalculator data, surveyed 2026-07-19
-(strategies/backtests/mtf_leverage_survey.py, one 1-share BUY MTF margin
-call per symbol at that moment's live LTP). Karan noticed the Sandbox
-engine's flat equity_mtf_leverage placeholder (2x) didn't match reality for
-SBIN (real: 4.55x) -- this table replaces the flat guess with real per-symbol
-data for the names it covers.
+Point-in-time Dhan margincalculator snapshot (one 1-share BUY MTF margin
+call per symbol at live LTP). Replaces the Sandbox engine's old flat
+equity_mtf_leverage placeholder (2x) with real per-symbol data for the
+names it covers.
 
-Real leverage ranges 2.38x (VEDL) to 4.55x (most liquid large-caps, which
-cluster at what looks like a ~22%-margin ceiling) -- a single flat number
-would materially overstate leverage for lower-leverage names, several of
-which are in the EMA Regime Crossover Swing strategy's own universe
-(ADANIPOWER, ADANIENSOL, ADANIGREEN, VEDL, TMCV all sit well below the
-median). See the survey CSV for the full distribution and methodology.
+Real leverage in this snapshot ranges about 2.38x to 4.55x. Symbols not
+in this table fall back to the equity_mtf_leverage Sandbox config, still
+editable via the Sandbox settings page (seeded at this survey's median,
+4.35x).
 
-Symbols not in this table (outside the surveyed Nifty 100) fall back to the
-equity_mtf_leverage Sandbox config -- still editable via the Sandbox
-settings page for whatever default fits, now seeded at the survey's median
-(4.35x) rather than a guess.
-
-This is a point-in-time snapshot, not a live feed -- Dhan's real margin
-requirements can change. Re-run the survey script periodically and refresh
+This is not a live feed -- broker margin requirements can change. Refresh
 this table if it drifts noticeably from live data.
 """
 
