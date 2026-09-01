@@ -1,13 +1,14 @@
 """Strategy Portfolio Blueprint.
 
 Persists Strategy Builder strategies to a local SQLite portfolio with two
-fixed watchlists: `mytrades` and `simulation`. Single-user, session-authed
-(no /api/v1 exposure — UI-only).
+fixed watchlists: `mytrades` and `simulation`. Also exposes hosted Python
+strategy stats (Analyzer/sandbox fills tagged with STRATEGY_NAME).
+Single-user, session-authed (no /api/v1 exposure — UI-only).
 """
 
 import os
 
-from flask import Blueprint, jsonify, request
+from flask import Blueprint, jsonify, request, session
 
 from database.strategy_portfolio_db import (
     WATCHLISTS,
@@ -43,6 +44,17 @@ def _validate_payload(data: dict) -> tuple[bool, str | None]:
     if len(data["name"]) > 120:
         return False, "name too long (max 120 chars)"
     return True, None
+
+
+@strategy_portfolio_bp.route("/api/strategy-portfolio/python", methods=["GET"])
+@check_session_validity
+@limiter.limit(PORTFOLIO_READ_LIMIT)
+def list_python_strategy_stats():
+    """Hosted Python strategy win rate / PF / P&L from tagged sandbox fills."""
+    from services.python_strategy_stats_service import build_python_portfolio
+
+    payload = build_python_portfolio(user_id=session.get("user"))
+    return jsonify({"status": "success", **payload})
 
 
 @strategy_portfolio_bp.route("/api/strategy-portfolio", methods=["GET"])
@@ -115,9 +127,7 @@ def update_strategy(entry_id: int):
     return jsonify({"status": "success", "item": row})
 
 
-@strategy_portfolio_bp.route(
-    "/api/strategy-portfolio/<int:entry_id>", methods=["DELETE"]
-)
+@strategy_portfolio_bp.route("/api/strategy-portfolio/<int:entry_id>", methods=["DELETE"])
 @check_session_validity
 @limiter.limit(PORTFOLIO_WRITE_LIMIT)
 def delete_strategy(entry_id: int):

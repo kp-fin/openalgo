@@ -12,7 +12,7 @@ const tools = [
   },
   {
     title: 'Strategy Portfolio',
-    description: 'Saved strategies across MyTrades and Simulation watchlists',
+    description: 'Options watchlists plus hosted Python strategy win rate, PF, and P&L',
     href: '/strategybuilder/portfolio',
     color: 'bg-violet-500',
   },

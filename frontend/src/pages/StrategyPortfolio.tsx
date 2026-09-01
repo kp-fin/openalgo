@@ -2,6 +2,7 @@ import {
   ArrowLeft,
   Briefcase,
   ChevronDown,
+  Code2,
   FlaskConical,
   Play,
   Radio,
@@ -15,9 +16,12 @@ import { apiClient } from '@/api/client'
 import {
   type PortfolioEntry,
   type PortfolioLeg,
+  type PythonPortfolioPayload,
+  type PythonStrategyStats,
   strategyPortfolioApi,
   type Watchlist,
 } from '@/api/strategy-portfolio'
+import { STATUS_COLORS, STATUS_LABELS } from '@/types/python-strategy'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -201,13 +205,39 @@ function legCount(entry: PortfolioEntry): { long: number; short: number } {
   return { long, short }
 }
 
+type PortfolioTab = Watchlist | 'python'
+
+function formatPnl(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  const sign = value > 0 ? '+' : value < 0 ? '-' : ''
+  return `${sign}₹${Math.abs(value).toLocaleString('en-IN', { maximumFractionDigits: 0 })}`
+}
+
+function formatPct(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  return `${value.toFixed(1)}%`
+}
+
+function formatPf(row: PythonStrategyStats): string {
+  if (row.profit_factor_infinite) return '∞'
+  if (row.profit_factor === null || row.profit_factor === undefined) return '—'
+  return row.profit_factor.toFixed(2)
+}
+
+function formatSharpe(value: number | null | undefined): string {
+  if (value === null || value === undefined) return 'Accumulating'
+  return value.toFixed(2)
+}
+
 export default function StrategyPortfolio() {
   const navigate = useNavigate()
   const { apiKey } = useAuthStore()
-  const [tab, setTab] = useState<Watchlist>('mytrades')
+  const [tab, setTab] = useState<PortfolioTab>('mytrades')
   const [myTrades, setMyTrades] = useState<PortfolioEntry[]>([])
   const [simulation, setSimulation] = useState<PortfolioEntry[]>([])
+  const [pythonPortfolio, setPythonPortfolio] = useState<PythonPortfolioPayload | null>(null)
   const [isLoading, setIsLoading] = useState(false)
+  const [isPythonLoading, setIsPythonLoading] = useState(false)
   // Entries are collapsed by default — only ids in this set are expanded.
   // Keyed by entry id for both watchlists; ids are unique across the table.
   const [expandedIds, setExpandedIds] = useState<Set<number>>(new Set())
@@ -233,9 +263,28 @@ export default function StrategyPortfolio() {
     }
   }, [])
 
+  const loadPython = useCallback(async () => {
+    setIsPythonLoading(true)
+    try {
+      const payload = await strategyPortfolioApi.pythonStats()
+      setPythonPortfolio(payload)
+    } catch (err) {
+      showToast.error(err instanceof Error ? err.message : 'Failed to load Python stats')
+      setPythonPortfolio({ items: [], correlations: [], source: 'sandbox_trades', note: '' })
+    } finally {
+      setIsPythonLoading(false)
+    }
+  }, [])
+
   useEffect(() => {
     load()
   }, [load])
+
+  useEffect(() => {
+    if (tab === 'python') {
+      loadPython()
+    }
+  }, [tab, loadPython])
 
   // Build the unique (symbol, exchange) subscription list across both
   // watchlists. Closed and expired legs are excluded: closed legs have
@@ -479,14 +528,14 @@ export default function StrategyPortfolio() {
               )}
             </div>
             <p className="text-sm text-muted-foreground">
-              Saved strategies across your two watchlists.
+              Options watchlists and hosted Python strategy stats.
             </p>
           </div>
         </div>
       </div>
 
-      <Tabs value={tab} onValueChange={(v) => setTab(v as Watchlist)}>
-        <TabsList className="grid w-full max-w-md grid-cols-2">
+      <Tabs value={tab} onValueChange={(v) => setTab(v as PortfolioTab)}>
+        <TabsList className="grid w-full max-w-xl grid-cols-3">
           {(Object.keys(tabConfig) as Watchlist[]).map((key) => {
             const cfg = tabConfig[key]
             const Icon = cfg.icon
@@ -500,6 +549,13 @@ export default function StrategyPortfolio() {
               </TabsTrigger>
             )
           })}
+          <TabsTrigger value="python" className="gap-2">
+            <Code2 className={cn('h-3.5 w-3.5', tab === 'python' && 'text-sky-600 dark:text-sky-400')} />
+            Python
+            <span className="ml-1 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-semibold">
+              {pythonPortfolio?.items.length ?? 0}
+            </span>
+          </TabsTrigger>
         </TabsList>
 
         {(Object.keys(tabConfig) as Watchlist[]).map((key) => {
@@ -807,6 +863,129 @@ export default function StrategyPortfolio() {
             </TabsContent>
           )
         })}
+
+        <TabsContent value="python" className="pt-4">
+          {isPythonLoading ? (
+            <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
+              Loading…
+            </div>
+          ) : !pythonPortfolio || pythonPortfolio.items.length === 0 ? (
+            <div className="flex h-40 flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed text-sm text-muted-foreground">
+              <Code2 className="h-6 w-6 opacity-40" />
+              <p>No hosted Python strategies yet.</p>
+              <Button variant="outline" size="sm" onClick={() => navigate('/python')}>
+                Open Python Strategies
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {(() => {
+                let cum = 0
+                for (const row of pythonPortfolio.items) cum += row.total_pnl
+                const tone =
+                  cum > 0
+                    ? 'text-emerald-600 dark:text-emerald-400'
+                    : cum < 0
+                      ? 'text-rose-600 dark:text-rose-400'
+                      : 'text-muted-foreground'
+                return (
+                  <div className="flex items-center justify-between gap-3 rounded-md border bg-card px-4 py-2.5 text-xs">
+                    <span className="font-medium text-muted-foreground">
+                      Cumulative realized P&amp;L · Python
+                    </span>
+                    <span className={cn('text-base font-bold tabular-nums', tone)}>
+                      {formatPnl(cum)}
+                    </span>
+                  </div>
+                )
+              })()}
+              {pythonPortfolio.note && (
+                <p className="text-[11px] text-muted-foreground">{pythonPortfolio.note}</p>
+              )}
+              <div className="overflow-x-auto rounded-lg border bg-card">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/40 text-left text-[11px] uppercase tracking-wide text-muted-foreground">
+                      <th className="px-3 py-2 font-semibold">Strategy</th>
+                      <th className="px-3 py-2 font-semibold">Status</th>
+                      <th className="px-3 py-2 font-semibold tabular-nums">Trades</th>
+                      <th className="px-3 py-2 font-semibold tabular-nums">Win %</th>
+                      <th className="px-3 py-2 font-semibold tabular-nums">PF</th>
+                      <th className="px-3 py-2 font-semibold tabular-nums">Avg P&amp;L</th>
+                      <th className="px-3 py-2 font-semibold tabular-nums">Total P&amp;L</th>
+                      <th className="px-3 py-2 font-semibold tabular-nums">Sharpe</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pythonPortfolio.items.map((row) => {
+                      const pnlTone =
+                        row.total_pnl > 0
+                          ? 'text-emerald-600 dark:text-emerald-400'
+                          : row.total_pnl < 0
+                            ? 'text-rose-600 dark:text-rose-400'
+                            : 'text-muted-foreground'
+                      return (
+                        <tr key={row.id} className="border-b last:border-0">
+                          <td className="px-3 py-2">
+                            <div className="font-semibold">{row.name}</div>
+                            <div className="text-[11px] text-muted-foreground">
+                              {row.file_name || row.id} · {row.exchange}
+                              {row.n_fills > 0 && ` · ${row.n_fills} fills`}
+                              {row.open_quantity > 0 && ` · ${row.open_quantity} open qty`}
+                            </div>
+                          </td>
+                          <td className="px-3 py-2">
+                            <span
+                              className={cn(
+                                'rounded px-2 py-0.5 text-[10px] font-semibold uppercase text-white',
+                                STATUS_COLORS[row.status] || 'bg-gray-500'
+                              )}
+                            >
+                              {STATUS_LABELS[row.status] || row.status}
+                            </span>
+                          </td>
+                          <td className="px-3 py-2 tabular-nums">{row.n_trades}</td>
+                          <td className="px-3 py-2 tabular-nums">{formatPct(row.win_rate)}</td>
+                          <td className="px-3 py-2 tabular-nums">{formatPf(row)}</td>
+                          <td className={cn('px-3 py-2 tabular-nums', pnlTone)}>
+                            {formatPnl(row.avg_pnl)}
+                          </td>
+                          <td className={cn('px-3 py-2 font-semibold tabular-nums', pnlTone)}>
+                            {formatPnl(row.total_pnl)}
+                          </td>
+                          <td className="px-3 py-2 tabular-nums text-muted-foreground">
+                            {formatSharpe(row.sharpe)}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {pythonPortfolio.correlations.length > 0 && (
+                <div className="rounded-lg border bg-card p-4">
+                  <h3 className="mb-2 text-sm font-semibold">Pairwise correlation (daily P&amp;L)</h3>
+                  <ul className="space-y-1 text-xs text-muted-foreground">
+                    {pythonPortfolio.correlations.map((pair) => (
+                      <li key={`${pair.a}:${pair.b}`}>
+                        {pair.a_name} ↔ {pair.b_name}:{' '}
+                        <span className="font-semibold tabular-nums text-foreground">
+                          {pair.correlation === null ? '—' : pair.correlation.toFixed(2)}
+                        </span>
+                        <span className="ml-1">({pair.n_days} days)</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              <div className="flex justify-end">
+                <Button variant="outline" size="sm" onClick={() => navigate('/python')}>
+                  Manage Python Strategies
+                </Button>
+              </div>
+            </div>
+          )}
+        </TabsContent>
       </Tabs>
 
       <AlertDialog

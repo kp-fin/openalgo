@@ -31,7 +31,10 @@ Your saved strategies at a glance.
 
 - **MyTrades** watchlist — live strategies you are tracking with real positions
 - **Simulation** watchlist — strategies saved for backtesting/simulation
+- **Python** tab — hosted `/python` strategies with win rate, profit factor, average P&L, total P&L, Sharpe (from daily rupee P&L), and pairwise correlation
 - Quick reopen into Strategy Builder for further analysis or execution
+
+Python stats come from **Analyzer/sandbox fills** whose `strategy` tag matches the hosted strategy name (`STRATEGY_NAME`), file stem, tags scraped from the script, or optional `strategy_tags` on the hosted strategy config. The host fills that tag automatically when a script omits `strategy=` on SDK order calls. Live broker positions are not strategy-tagged, so they do not appear in this grid.
 
 ### 3. Option Chain (`/optionchain`)
 

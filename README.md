@@ -117,7 +117,7 @@ A suite of twelve built-in analytical tools for options trading and market analy
 | Tool | Route | What it does |
 |------|-------|--------------|
 | **Strategy Builder** | `/strategybuilder` | Build multi-leg option strategies with live Greeks, payoff diagrams, what-if simulators, Strategy Chart, Multi Strike OI tabs, and basket order execution |
-| **Strategy Portfolio** | `/strategybuilder/portfolio` | Saved strategies across MyTrades and Simulation watchlists |
+| **Strategy Portfolio** | `/strategybuilder/portfolio` | Options watchlists plus hosted Python strategy stats |
 | **Option Chain** | `/optionchain` | Real-time option chain with live Greeks, OI data, and quick order placement |
 | **Option Greeks** | `/ivchart` | Historical IV, Delta, Theta, Vega, and Gamma charts for ATM options |
 | **OI Tracker** | `/oitracker` | Open Interest analysis with CE/PE OI bars, PCR overlay, and ATM strike marker |

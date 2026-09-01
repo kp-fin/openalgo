@@ -86,6 +86,10 @@ openalgo/
 
 ## Key Features
 
+### Strategy Portfolio stats
+
+Hosted subprocesses default the OpenAlgo SDK `strategy=` argument to `STRATEGY_NAME` when it is omitted (`utils/hosted_strategy_tag.py`, installed from `blueprints/_run_strategy.py`). Strategy Portfolio's **Python** tab (`GET /api/strategy-portfolio/python`) then attributes Analyzer/sandbox fills to each hosted strategy and reports win rate, profit factor, average P&L, Sharpe, and pairwise daily-P&L correlation.
+
 ### Process Isolation
 
 Each strategy runs in a separate subprocess:
@@ -457,7 +461,7 @@ For 2GB containers, set all to `1`. For 4GB+, use `2`. See [Docker Configuration
 | File | Purpose |
 |------|---------|
 | `blueprints/python_strategy.py` | Strategy hosting blueprint |
-| `strategies/scripts/` | User strategy files |
-| `strategies/strategy_configs.json` | Configuration persistence |
+| `PYTHON_STRATEGIES_ROOT` (or `./strategies`) | Live strategy tree; host runs `*_signal.py` in place |
+| `{root}/strategy_configs.json` | Configuration persistence |
 | `log/strategies/` | Strategy log output |
 | `database/market_calendar_db.py` | Market hours/holidays |

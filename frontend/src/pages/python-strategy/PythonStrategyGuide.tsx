@@ -418,7 +418,9 @@ export default function PythonStrategyGuide() {
               <p className="text-muted-foreground">
                 The host injects <code>OPENALGO_API_KEY</code>, <code>STRATEGY_ID</code>,{' '}
                 <code>STRATEGY_NAME</code>, and <code>OPENALGO_STRATEGY_EXCHANGE</code> into each
-                strategy's environment. Your <code>.env</code> variables (like{' '}
+                strategy's environment. Hosted runs also default the SDK <code>strategy=</code> tag
+                to <code>STRATEGY_NAME</code> when you omit it, so Analyzer fills show up on{' '}
+                <strong>Strategy Portfolio → Python</strong>. Your <code>.env</code> variables (like{' '}
                 <code>HOST_SERVER</code>, <code>WEBSOCKET_URL</code>) are also inherited. Custom
                 parameters from the upload form become additional env vars.
               </p>
@@ -480,7 +482,11 @@ export default function PythonStrategyGuide() {
                     <td className="py-2 pr-4">
                       <code>STRATEGY_NAME</code>
                     </td>
-                    <td className="py-2">Name of the strategy (as entered at upload)</td>
+                    <td className="py-2">
+                      Name of the strategy (as entered at upload). Used as the default{' '}
+                      <code>strategy=</code> tag on SDK orders so Strategy Portfolio can attribute
+                      sandbox P&amp;L.
+                    </td>
                   </tr>
                   <tr className="border-b">
                     <td className="py-2 pr-4">
